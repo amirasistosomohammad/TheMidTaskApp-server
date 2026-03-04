@@ -15,11 +15,40 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // User::factory(10)->create();
+        // Default Central Administrative Officer account for THE MID-TASK APP.
+        User::updateOrCreate(
+            ['email' => 'central.admin@midtaskapp.com'],
+            [
+                'name' => 'Central Administrative Officer',
+                'password' => '123456', // hashed via User::$casts
+                'role' => 'central_admin',
+                'status' => 'active',
+            ]
+        );
 
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
-        ]);
+        // Test School Head account (for testing Validations, Task history, etc.)
+        User::updateOrCreate(
+            ['email' => 'school.head@midtaskapp.com'],
+            [
+                'name' => 'School Head Test',
+                'password' => 'password123',
+                'role' => 'school_head',
+                'status' => 'active',
+                'email_verified_at' => now(),
+                'employee_id' => 'EMP-SH-001',
+                'position' => 'School Head',
+                'division' => 'Midsalip District',
+                'school_name' => 'Midsalip Central School',
+            ]
+        );
+
+        // Pending-approval users for testing Account approvals UI. Disable by commenting out the line below.
+        $this->call(PendingApprovalsSeeder::class);
+
+        // Personnel (active, rejected, inactive) for testing Personnel Directory UI. Disable by commenting out the line below.
+        $this->call(PersonnelDirectorySeeder::class);
+
+        // 10 common reports from SYSTEM_CONCEPT.md. Idempotent.
+        $this->call(CommonReportsSeeder::class);
     }
 }

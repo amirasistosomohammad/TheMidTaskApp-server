@@ -56,6 +56,15 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Frontend URL (for password reset links, etc.)
+    |--------------------------------------------------------------------------
+    | Set this to the URL where your React/Vite client runs. Vite default is
+    | port 5173; Create React App often uses 3000.
+    */
+    'frontend_url' => env('FRONTEND_URL', 'http://localhost:5173'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------
     |
