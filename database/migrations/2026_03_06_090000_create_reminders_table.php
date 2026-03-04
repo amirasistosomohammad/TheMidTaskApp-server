@@ -35,8 +35,13 @@ return new class extends Migration
 
             $table->timestamps();
 
-            // Prevent duplicates for the same task at the same reminder time (per channel/type).
-            $table->unique(['user_task_id', 'remind_at', 'channel', 'type'], 'reminders_task_time_channel_type_unique');
+            // Prevent duplicates for the same task at the same reminder time (per channel/type)
+            // per user. Include user_id so multiple recipients (e.g. multiple School Heads) can
+            // receive separate reminders for the same task.
+            $table->unique(
+                ['user_id', 'user_task_id', 'remind_at', 'channel', 'type'],
+                'reminders_user_task_time_channel_type_unique'
+            );
             $table->index(['user_id', 'status', 'remind_at']);
         });
     }

@@ -11,16 +11,8 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('reminders', function (Blueprint $table) {
-            // Previous unique constraint did not include user_id which prevents multiple recipients
-            // (e.g. multiple School Heads) from receiving the same reminder.
-            $table->dropUnique('reminders_task_time_channel_type_unique');
-
-            $table->unique(
-                ['user_id', 'user_task_id', 'remind_at', 'channel', 'type'],
-                'reminders_user_task_time_channel_type_unique'
-            );
-        });
+        // No-op: the correct unique index is now created directly in
+        // 2026_03_06_090000_create_reminders_table.php for fresh installs.
     }
 
     /**
@@ -28,14 +20,7 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::table('reminders', function (Blueprint $table) {
-            $table->dropUnique('reminders_user_task_time_channel_type_unique');
-
-            $table->unique(
-                ['user_task_id', 'remind_at', 'channel', 'type'],
-                'reminders_task_time_channel_type_unique'
-            );
-        });
+        // No-op.
     }
 };
 
