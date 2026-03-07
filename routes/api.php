@@ -5,6 +5,11 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\TaskController;
 use App\Http\Controllers\Api\ReminderController;
+use App\Http\Controllers\Api\BackupController;
+use App\Http\Controllers\Api\SettingsController;
+use App\Http\Controllers\Api\SchoolHeadAssignmentController;
+use App\Http\Controllers\Api\ActivityLogController;
+use App\Http\Controllers\Api\ReportController;
 
 /*
 |--------------------------------------------------------------------------
@@ -22,6 +27,9 @@ Route::post('/verify-email', [AuthController::class, 'verifyEmail']);
 Route::post('/resend-otp', [AuthController::class, 'resendOtp']);
 Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword']);
+
+// System settings (public — used by layout/login for app name & logo)
+Route::get('/settings', [SettingsController::class, 'index']);
 
 // Serve stored files (MOVs, avatars) – public so img preview and "View file" work without auth redirect.
 // Paths are unguessable (e.g. movs/78/random-string.png). Must be registered before auth group.
@@ -44,10 +52,30 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Central Admin: personnel directory (approved, rejected, inactive)
     Route::get('/admin/personnel', [AdminController::class, 'personnel']);
+    Route::get('/admin/users/{id}/school-heads', [AdminController::class, 'userSchoolHeads']);
     Route::get('/admin/monitor-officers', [AdminController::class, 'monitorOfficers']);
+    Route::get('/admin/dashboard', [AdminController::class, 'dashboard']);
+    Route::get('/admin/activity-logs', [ActivityLogController::class, 'index']);
     Route::post('/admin/users/{id}/deactivate', [AdminController::class, 'deactivate']);
     Route::post('/admin/users/{id}/activate', [AdminController::class, 'activate']);
     Route::delete('/admin/users/{id}', [AdminController::class, 'destroyUser']);
+
+    // Central Admin: School Head ↔ Administrative Officer assignments
+    Route::get('/admin/school-heads/{id}/aos', [SchoolHeadAssignmentController::class, 'index']);
+    Route::post('/admin/school-heads/{id}/aos', [SchoolHeadAssignmentController::class, 'store']);
+    Route::delete('/admin/school-heads/{id}/aos/{aoId}', [SchoolHeadAssignmentController::class, 'destroy']);
+
+    // Central Admin: system settings (app name, tagline, logo)
+    Route::put('/admin/settings', [SettingsController::class, 'update']);
+    Route::post('/admin/settings/logo', [SettingsController::class, 'uploadLogo']);
+
+    // Central Admin: SQL backup (manual + scheduled) and schedule
+    Route::get('/admin/backup', [BackupController::class, 'download']);
+    Route::get('/admin/backup/schedule', [BackupController::class, 'getSchedule']);
+    Route::put('/admin/backup/schedule', [BackupController::class, 'updateSchedule']);
+    Route::get('/admin/backup/list', [BackupController::class, 'listBackups']);
+    Route::get('/admin/backup/download/latest', [BackupController::class, 'downloadLatest']);
+    Route::get('/admin/backup/download/file/{filename}', [BackupController::class, 'downloadFile']);
 
     // Central Admin: tasks (create/edit/delete, assign)
     Route::get('/admin/tasks', [TaskController::class, 'index']);
@@ -64,10 +92,13 @@ Route::middleware('auth:sanctum')->group(function () {
     // Administrative Officer: dashboard (grouped pending/missing/completed), my tasks, task detail, submissions
     Route::get('/dashboard', [TaskController::class, 'dashboard']);
     Route::get('/my-tasks', [TaskController::class, 'myTasks']);
+    Route::get('/my-submitted-files', [TaskController::class, 'mySubmittedFiles']);
+    Route::get('/submission-files/{id}/download', [TaskController::class, 'downloadSubmissionFile']);
     Route::get('/user-tasks/{id}', [TaskController::class, 'showUserTask']);
     Route::get('/user-tasks/{id}/submissions', [TaskController::class, 'listSubmissions']);
     Route::post('/user-tasks/{id}/submissions/upload', [TaskController::class, 'uploadMov']);
     Route::post('/user-tasks/{id}/submissions/input', [TaskController::class, 'submitInput']);
+    Route::put('/user-tasks/{id}/submission/notes', [TaskController::class, 'updateSubmissionNotes']);
     Route::post('/user-tasks/{id}/submit', [TaskController::class, 'submitUserTask']);
 
     // Administrative Officer: reminders (Phase 6.3)
@@ -75,6 +106,20 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/reminders/{id}/read', [ReminderController::class, 'markAsRead']);
 
     // School Head: validations
+    Route::get('/school-head/dashboard', [TaskController::class, 'schoolHeadDashboard']);
     Route::get('/school-head/validations/pending', [TaskController::class, 'pendingValidations']);
     Route::post('/school-head/validations/{id}', [TaskController::class, 'validateSubmission']);
+    Route::get('/school-head/validations/report', [TaskController::class, 'validationReport']);
+
+    // School Head: task history
+    Route::get('/school-head/task-history', [TaskController::class, 'taskHistory']);
+
+    // Performance report (Personnel: own report; School Head: report for supervised AO)
+    Route::get('/reports/performance-report', [ReportController::class, 'performanceReport']);
+
+    // School Head: list supervised AOs for report dropdown
+    Route::get('/school-head/supervised-officers', [TaskController::class, 'supervisedOfficers']);
+
+    // Administrative Officer: personal tasks
+    Route::post('/my-personal-tasks', [TaskController::class, 'storePersonal']);
 });

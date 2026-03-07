@@ -3,10 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\ActivityLog;
+use App\Models\BackupSetting;
 use App\Models\Task;
 use App\Models\User;
 use App\Models\UserTask;
 use App\Services\DueDateService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -29,6 +32,107 @@ class AdminController extends Controller
     }
 
     /**
+     * Central Admin dashboard summary: KPI counts + recent activity.
+     * GET /api/admin/dashboard
+     */
+    public function dashboard(Request $request): JsonResponse
+    {
+        $this->ensureCentralAdmin($request);
+
+        $today = Carbon::now()->startOfDay();
+
+        $pendingApprovals = User::where('status', 'pending_approval')
+            ->whereNotNull('email_verified_at')
+            ->count();
+
+        $activeOfficers = User::where('role', 'administrative_officer')
+            ->where('status', 'active')
+            ->count();
+
+        $activeSchoolHeads = User::where('role', 'school_head')
+            ->where('status', 'active')
+            ->count();
+
+        $totalTasks = Task::where(function ($q) {
+                $q->where('is_personal', false)
+                    ->orWhere('personal_visible_to_central', true);
+            })->count();
+
+        $visibleAssignments = function ($status, ?bool $overdue = null) use ($today) {
+            $query = UserTask::where('status', $status)
+                ->whereHas('task', function ($q) {
+                    $q->where(function ($qq) {
+                        $qq->where('is_personal', false)
+                            ->orWhere('personal_visible_to_central', true);
+                    });
+                });
+
+            if ($overdue === true) {
+                $query->whereDate('due_date', '<', $today->toDateString());
+            }
+
+            return $query->count();
+        };
+
+        $pendingAssignments = $visibleAssignments(UserTask::STATUS_PENDING);
+        $overdueAssignments = $visibleAssignments(UserTask::STATUS_PENDING, true);
+        $submittedAssignments = $visibleAssignments(UserTask::STATUS_SUBMITTED);
+        $completedAssignments = $visibleAssignments(UserTask::STATUS_COMPLETED);
+
+        $tz = BackupSetting::TIMEZONE_DEFAULT;
+        $backup = BackupSetting::get();
+
+        $recent = ActivityLog::query()
+            ->with('actor:id,name,email')
+            ->orderByDesc('created_at')
+            ->limit(8)
+            ->get()
+            ->map(function (ActivityLog $log) {
+                $createdAt = $log->created_at;
+                $storageTz = 'Asia/Manila';
+                $utcIso = $createdAt
+                    ? Carbon::parse($createdAt->format('Y-m-d H:i:s'), $storageTz)->setTimezone('UTC')->toIso8601String()
+                    : null;
+                return [
+                    'id' => $log->id,
+                    'action' => $log->action,
+                    'description' => $log->description,
+                    'ip_address' => $log->ip_address,
+                    'created_at' => $utcIso,
+                    'actor' => $log->actor ? [
+                        'id' => $log->actor->id,
+                        'name' => $log->actor->name,
+                        'email' => $log->actor->email,
+                    ] : null,
+                ];
+            });
+
+        return response()->json([
+            'kpis' => [
+                'pending_approvals' => $pendingApprovals,
+                'active_officers' => $activeOfficers,
+                'active_school_heads' => $activeSchoolHeads,
+                'total_tasks' => $totalTasks,
+                'assignments' => [
+                    'pending' => $pendingAssignments,
+                    'overdue' => $overdueAssignments,
+                    'submitted' => $submittedAssignments,
+                    'completed' => $completedAssignments,
+                ],
+            ],
+            'backup' => [
+                'frequency' => $backup->frequency,
+                'run_at_time' => $backup->run_at_time,
+                'timezone' => $tz,
+                'last_run_at' => $backup->last_run_at ? Carbon::parse($backup->last_run_at)->setTimezone('UTC')->toIso8601String() : null,
+                'next_run_at' => $backup->next_run_at ? Carbon::parse($backup->next_run_at)->setTimezone('UTC')->toIso8601String() : null,
+                'has_latest_file' => (bool) ($backup->last_backup_path && Storage::disk('local')->exists($backup->last_backup_path)),
+            ],
+            'recent_activity' => $recent,
+        ]);
+    }
+
+    /**
      * Create a user (School Head or Administrative Officer) — Central Admin only.
      * Body: name, email, password, role (school_head|administrative_officer), employee_id, position, division, school_name.
      * User is created as active with email_verified_at set. Admin shares credentials manually.
@@ -46,6 +150,8 @@ class AdminController extends Controller
             'position' => ['nullable', 'string', 'max:255'],
             'division' => ['nullable', 'string', 'max:255'],
             'school_name' => ['nullable', 'string', 'max:255'],
+            // Optional: assign this Administrative Officer to a School Head immediately.
+            'school_head_id' => ['nullable', 'integer', 'exists:users,id'],
         ], [
             'password.regex' => 'Password must contain at least one letter and one number.',
         ]);
@@ -62,6 +168,20 @@ class AdminController extends Controller
             'division' => $valid['division'] ?? null,
             'school_name' => $valid['school_name'] ?? null,
         ]);
+
+        // If an Administrative Officer is being created and a School Head was provided,
+        // create the supervision mapping immediately so validations and reminders are scoped.
+        if ($user->role === 'administrative_officer' && isset($valid['school_head_id'])) {
+            $schoolHead = User::where('id', $valid['school_head_id'])
+                ->where('role', 'school_head')
+                ->where('status', 'active')
+                ->first();
+
+            if ($schoolHead) {
+                $schoolHead->supervisedAdministrativeOfficers()->syncWithoutDetaching([$user->id]);
+            }
+        }
+        ActivityLog::log($request->user()->id, 'user_created', 'Created user: ' . $user->name . ' (' . $user->email . ', ' . $user->role . ')', ['user_id' => $user->id], $request);
 
         return response()->json([
             'message' => 'User created successfully. Share the credentials with the user.',
@@ -179,6 +299,7 @@ class AdminController extends Controller
                 $this->assignDefaultTasksToUser($user);
             }
         });
+        ActivityLog::log($request->user()->id, 'user_approved', 'Approved account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
 
         return response()->json([
             'message' => 'Account approved successfully.',
@@ -201,8 +322,10 @@ class AdminController extends Controller
      */
     private function assignDefaultTasksToUser(User $user): void
     {
-        // Use the same ordering as the Task list for a predictable set.
-        $tasks = Task::orderBy('is_common', 'desc')
+        // Use the same ordering as the Task list for a predictable set,
+        // excluding personal tasks which are created directly by officers.
+        $tasks = Task::where('is_personal', false)
+            ->orderBy('is_common', 'desc')
             ->orderBy('common_report_no')
             ->orderBy('name')
             ->get();
@@ -273,6 +396,7 @@ class AdminController extends Controller
             'approved_at' => null,
             'approved_remarks' => null,
         ]);
+        ActivityLog::log($request->user()->id, 'user_rejected', 'Rejected account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
 
         return response()->json([
             'message' => 'Account rejected.',
@@ -344,6 +468,46 @@ class AdminController extends Controller
     }
 
     /**
+     * List School Heads assigned to a user (Administrative Officer). Central Admin only.
+     * Returns empty list if user is not an AO or has no assigned School Heads.
+     */
+    public function userSchoolHeads(Request $request, int $id): JsonResponse
+    {
+        $this->ensureCentralAdmin($request);
+
+        $user = User::find($id);
+        if (! $user || $user->role !== 'administrative_officer') {
+            return response()->json(['school_heads' => []]);
+        }
+
+        $schoolHeads = $user->supervisingSchoolHeads()
+            ->orderBy('name')
+            ->get([
+                'users.id',
+                'users.name',
+                'users.email',
+                'users.employee_id',
+                'users.position',
+                'users.division',
+                'users.school_name',
+                'users.status',
+            ]);
+
+        return response()->json([
+            'school_heads' => $schoolHeads->map(fn ($sh) => [
+                'id' => $sh->id,
+                'name' => $sh->name,
+                'email' => $sh->email,
+                'employee_id' => $sh->employee_id,
+                'position' => $sh->position,
+                'division' => $sh->division,
+                'school_name' => $sh->school_name,
+                'status' => $sh->status,
+            ]),
+        ]);
+    }
+
+    /**
      * Monitor task progress of all Administrative Officers (Central Admin).
      * Query: ?school=... to filter by school_name.
      * Returns per-user: pending, missing, completed counts and user_tasks list.
@@ -363,7 +527,7 @@ class AdminController extends Controller
         }
 
         $users = $query->orderBy('name')->get([
-            'id', 'name', 'email', 'employee_id', 'position', 'division', 'school_name',
+            'id', 'name', 'email', 'employee_id', 'position', 'division', 'school_name', 'avatar_url',
         ]);
 
         $today = now()->startOfDay();
@@ -375,6 +539,11 @@ class AdminController extends Controller
             $completed = [];
 
             foreach ($user->userTasks as $ut) {
+                $task = $ut->task;
+                if ($task && $task->is_personal && ! $task->personal_visible_to_central) {
+                    continue;
+                }
+
                 $item = [
                     'id' => $ut->id,
                     'task_id' => $ut->task_id,
@@ -382,12 +551,12 @@ class AdminController extends Controller
                     'status' => $ut->status,
                     'period_covered' => $ut->period_covered,
                     'completed_at' => $ut->completed_at?->toIso8601String(),
-                    'task' => $ut->task ? [
-                        'id' => $ut->task->id,
-                        'name' => $ut->task->name,
-                        'frequency' => $ut->task->frequency,
-                        'action' => $ut->task->action,
-                        'mov_description' => $ut->task->mov_description,
+                    'task' => $task ? [
+                        'id' => $task->id,
+                        'name' => $task->name,
+                        'frequency' => $task->frequency,
+                        'action' => $task->action,
+                        'mov_description' => $task->mov_description,
                     ] : null,
                 ];
 
@@ -408,6 +577,7 @@ class AdminController extends Controller
                 'position' => $user->position,
                 'division' => $user->division,
                 'school_name' => $user->school_name,
+                'avatar_url' => $user->avatar_url,
                 'pending_count' => count($pending),
                 'missing_count' => count($missing),
                 'completed_count' => count($completed),
@@ -450,6 +620,7 @@ class AdminController extends Controller
 
         // Revoke all tokens so the deactivated user is immediately logged out
         $user->tokens()->delete();
+        ActivityLog::log($request->user()->id, 'user_deactivated', 'Deactivated account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
 
         return response()->json([
             'message' => 'Account deactivated successfully.',
@@ -476,6 +647,14 @@ class AdminController extends Controller
             'approved_remarks' => is_string($remarks) ? trim($remarks) : $user->approved_remarks,
         ]);
 
+        ActivityLog::log(
+            $request->user()->id,
+            'user_activated',
+            'Activated account: ' . $user->name . ' (' . $user->email . ')',
+            ['user_id' => $user->id],
+            $request
+        );
+
         return response()->json([
             'message' => 'Account activated successfully.',
             'user' => [
@@ -496,8 +675,19 @@ class AdminController extends Controller
         $this->ensureCentralAdmin($request);
 
         $user = User::whereIn('status', ['active', 'inactive', 'rejected'])->findOrFail($id);
+        $userName = $user->name;
+        $userEmail = $user->email;
+        $userRole = $user->role;
         $user->tokens()->delete();
         $user->delete();
+
+        ActivityLog::log(
+            $request->user()->id,
+            'user_deleted',
+            'Deleted user: ' . $userName . ' (' . $userEmail . ', ' . $userRole . ')',
+            ['user_id' => $id, 'role' => $userRole],
+            $request
+        );
 
         return response()->json([
             'message' => 'User deleted successfully.',

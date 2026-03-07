@@ -5,6 +5,7 @@ namespace App\Models;
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -71,5 +72,34 @@ class User extends Authenticatable
     public function userTasks(): HasMany
     {
         return $this->hasMany(UserTask::class);
+    }
+
+    /**
+     * Administrative Officers supervised by this School Head.
+     */
+    public function supervisedAdministrativeOfficers(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            related: self::class,
+            table: 'school_head_ao',
+            foreignPivotKey: 'school_head_id',
+            relatedPivotKey: 'ao_id'
+        )->where('role', 'administrative_officer');
+    }
+
+    /**
+     * School Heads supervising this Administrative Officer.
+     *
+     * For now we expect a single School Head, but we model many-to-many
+     * to keep the schema flexible.
+     */
+    public function supervisingSchoolHeads(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            related: self::class,
+            table: 'school_head_ao',
+            foreignPivotKey: 'ao_id',
+            relatedPivotKey: 'school_head_id'
+        )->where('role', 'school_head');
     }
 }

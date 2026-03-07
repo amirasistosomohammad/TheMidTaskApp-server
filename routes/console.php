@@ -9,5 +9,7 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 // Phase 6.2 — Reminders scheduler
-// Generate \"due soon\" reminders for upcoming user tasks at regular intervals.
 Schedule::command('reminders:generate-due-soon')->hourly();
+
+// Automated SQL backup: check every minute so scheduled runs trigger on time
+Schedule::command('backup:run')->everyMinute();

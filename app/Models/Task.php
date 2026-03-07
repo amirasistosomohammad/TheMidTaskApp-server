@@ -23,6 +23,10 @@ class Task extends Model
         'action',
         'is_common',
         'common_report_no',
+        'is_personal',
+        'owner_user_id',
+        'personal_visible_to_central',
+        'personal_visible_to_school_head',
     ];
 
     /**
@@ -34,6 +38,9 @@ class Task extends Model
     {
         return [
             'is_common' => 'boolean',
+            'is_personal' => 'boolean',
+            'personal_visible_to_central' => 'boolean',
+            'personal_visible_to_school_head' => 'boolean',
         ];
     }
 
@@ -52,6 +59,7 @@ class Task extends Model
     public const FREQUENCY_END_OF_SY = 'end_of_sy';
     public const FREQUENCY_QUARTERLY = 'quarterly';
     public const FREQUENCY_EVERY_TWO_MONTHS = 'every_two_months';
+    public const FREQUENCY_ONE_TIME = 'one_time';
 
     /**
      * Get the user task assignments for this task.

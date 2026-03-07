@@ -77,6 +77,13 @@ return [
     'timezone' => 'UTC',
 
     /*
+    | Timezone in which activity_logs.created_at is stored (e.g. server/MySQL local).
+    | Used when returning logs to the API so the frontend shows correct local time.
+    | Set to UTC if your DB already stores timestamps in UTC.
+    */
+    'activity_log_storage_timezone' => env('ACTIVITY_LOG_STORAGE_TIMEZONE', 'Asia/Manila'),
+
+    /*
     |--------------------------------------------------------------------------
     | Application Locale Configuration
     |--------------------------------------------------------------------------

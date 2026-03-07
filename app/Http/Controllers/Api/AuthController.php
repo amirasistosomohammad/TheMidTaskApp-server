@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\ActivityLog;
 use App\Models\User;
 use App\Mail\OtpMail;
 use App\Mail\ResetPasswordMail;
@@ -11,6 +12,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Illuminate\Validation\Rules\Password;
@@ -283,6 +285,7 @@ class AuthController extends Controller
         if ($user->status === 'pending_approval') {
             $user->tokens()->where('name', 'auth')->delete();
             $token = $user->createToken('auth')->plainTextToken;
+            ActivityLog::log($user->id, 'login', $user->name . ' logged in (pending approval)', null, $request);
 
             return response()->json([
                 'message' => 'Your account is pending approval. You have access to the dashboard until an administrator approves your account.',
@@ -295,6 +298,7 @@ class AuthController extends Controller
         // status === 'active' — allow full login
         $user->tokens()->where('name', 'auth')->delete();
         $token = $user->createToken('auth')->plainTextToken;
+        ActivityLog::log($user->id, 'login', $user->name . ' logged in', null, $request);
 
         return response()->json([
             'message' => 'Login successful.',

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\ActivityLog;
 use App\Models\Task;
 use App\Models\User;
 use App\Models\UserTask;
@@ -54,7 +55,11 @@ class TaskController extends Controller
     {
         $this->ensureCentralAdmin($request);
 
-        $tasks = Task::orderBy('is_common', 'desc')
+        $tasks = Task::where(function ($q) {
+                $q->where('is_personal', false)
+                    ->orWhere('personal_visible_to_central', true);
+            })
+            ->orderBy('is_common', 'desc')
             ->orderBy('common_report_no')
             ->orderBy('name')
             ->get();
@@ -102,6 +107,7 @@ class TaskController extends Controller
             ->where('status', 'active')
             ->get();
 
+        $createdAssignments = 0;
         foreach ($officers as $officer) {
             foreach ($dates as $d) {
                 UserTask::create([
@@ -111,8 +117,24 @@ class TaskController extends Controller
                     'status' => UserTask::STATUS_PENDING,
                     'period_covered' => $d->format('Y-m'),
                 ]);
+                $createdAssignments++;
             }
         }
+
+        ActivityLog::log(
+            $request->user()->id,
+            'task_created',
+            'Created task: ' . $task->name,
+            [
+                'task_id' => $task->id,
+                'frequency' => $task->frequency,
+                'action' => $task->action,
+                'assigned_user_count' => $officers->count(),
+                'generated_due_dates' => count($dates),
+                'created_assignments' => $createdAssignments,
+            ],
+            $request
+        );
 
         return response()->json([
             'message' => 'Task created successfully.',
@@ -138,9 +160,10 @@ class TaskController extends Controller
                 ->where('status', 'active')
                 ->get();
 
-        // Use the same ordering as the Task list; treat all tasks as standard tasks
-        // instead of relying on the legacy "common reports" flags.
-        $tasks = Task::orderBy('is_common', 'desc')
+        // Use the same ordering as the Task list; treat all centrally-managed tasks
+        // as standard tasks instead of relying on the legacy "common reports" flags.
+        $tasks = Task::where('is_personal', false)
+            ->orderBy('is_common', 'desc')
             ->orderBy('common_report_no')
             ->orderBy('name')
             ->get();
@@ -180,6 +203,19 @@ class TaskController extends Controller
                 }
             }
         });
+
+        ActivityLog::log(
+            $request->user()->id,
+            'tasks_bulk_assigned',
+            'Bulk assigned tasks: ' . $created . ' assignment(s) created.',
+            [
+                'created_count' => $created,
+                'user_count' => $users->count(),
+                'task_count' => $tasks->count(),
+                'scoped_to_user_ids' => is_array($userIds) ? array_values(array_unique(array_map('intval', $userIds))) : null,
+            ],
+            $request
+        );
 
         return response()->json([
             'message' => $created . ' assignment(s) created for ' . $users->count() . ' user(s).',
@@ -250,6 +286,18 @@ class TaskController extends Controller
             $userTask->save();
         }
 
+        ActivityLog::log(
+            $request->user()->id,
+            'task_updated',
+            'Updated task: ' . $task->name,
+            [
+                'task_id' => $task->id,
+                'updated_fields' => array_values(array_keys($valid)),
+                'pending_assignments_recomputed' => $pendingAssignments->count(),
+            ],
+            $request
+        );
+
         return response()->json([
             'message' => 'Task updated successfully.',
             'task' => $this->taskToArray($task->fresh()),
@@ -264,7 +312,16 @@ class TaskController extends Controller
         $this->ensureCentralAdmin($request);
 
         $task = Task::findOrFail($id);
+        $taskName = $task->name;
         $task->delete();
+
+        ActivityLog::log(
+            $request->user()->id,
+            'task_deleted',
+            'Deleted task: ' . $taskName,
+            ['task_id' => $id, 'task_name' => $taskName],
+            $request
+        );
 
         return response()->json([
             'message' => 'Task deleted successfully.',
@@ -381,6 +438,20 @@ class TaskController extends Controller
             }
         });
 
+        $userIds = array_values(array_unique(array_map(fn ($a) => (int) ($a['user_id'] ?? 0), $created)));
+        $userIds = array_values(array_filter($userIds));
+        ActivityLog::log(
+            $request->user()->id,
+            'task_assigned',
+            'Assigned task: ' . $task->name . ' (' . count($created) . ' assignment(s))',
+            [
+                'task_id' => $task->id,
+                'created_count' => count($created),
+                'target_user_ids' => $userIds,
+            ],
+            $request
+        );
+
         return response()->json([
             'message' => count($created) . ' assignment(s) created.',
             'assignments' => $created,
@@ -442,9 +513,92 @@ class TaskController extends Controller
             }
         });
 
+        ActivityLog::log(
+            $request->user()->id,
+            'task_assigned_recurring',
+            'Created recurring assignments: ' . $task->name . ' for ' . $user->name,
+            [
+                'task_id' => $task->id,
+                'user_id' => $user->id,
+                'created_count' => count($created),
+                'requested_count' => (int) ($valid['count'] ?? 0),
+            ],
+            $request
+        );
+
         return response()->json([
             'message' => count($created) . ' recurring assignment(s) created.',
             'assignments' => $created,
+        ], 201);
+    }
+
+    /**
+     * Create a personal task for the authenticated Administrative Officer.
+     * Personal tasks are always visible in Central Admin monitoring and
+     * School Head validation views.
+     */
+    public function storePersonal(Request $request): JsonResponse
+    {
+        $this->ensureAdministrativeOfficer($request);
+
+        /** @var User $user */
+        $user = $request->user();
+
+        $valid = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'due_date' => ['required', 'date'],
+            'mov_description' => ['nullable', 'string'],
+            'action' => ['required', Rule::in([Task::ACTION_UPLOAD, Task::ACTION_INPUT])],
+        ]);
+
+        $userTask = null;
+        $task = null;
+
+        DB::transaction(function () use ($user, $valid, &$task, &$userTask, $request) {
+            $task = Task::create([
+                'name' => $valid['name'],
+                'submission_date_rule' => null,
+                'frequency' => Task::FREQUENCY_ONE_TIME,
+                'mov_description' => $valid['mov_description'] ?? null,
+                'action' => $valid['action'],
+                'is_common' => false,
+                'common_report_no' => null,
+                'is_personal' => true,
+                'owner_user_id' => $user->id,
+                'personal_visible_to_central' => true,
+                'personal_visible_to_school_head' => true,
+            ]);
+
+            /** @var UserTask $userTaskModel */
+            $userTask = UserTask::create([
+                'user_id' => $user->id,
+                'task_id' => $task->id,
+                'due_date' => $valid['due_date'],
+                'status' => UserTask::STATUS_PENDING,
+                'period_covered' => null,
+            ]);
+
+            ActivityLog::log(
+                $user->id,
+                'personal_task_created',
+                'Created personal task: ' . $task->name,
+                [
+                    'task_id' => $task->id,
+                    'user_task_id' => $userTask->id,
+                    'due_date' => $userTask->due_date?->toDateString(),
+                    'action' => $task->action,
+                ],
+                $request
+            );
+        });
+
+        $task->refresh();
+        $userTask->load('task');
+
+        return response()->json([
+            'message' => 'Personal task created successfully.',
+            'task' => $this->taskToArray($task),
+            'user_task' => $this->userTaskToDashboardItem($userTask),
         ], 201);
     }
 
@@ -538,6 +692,60 @@ class TaskController extends Controller
     }
 
     /**
+     * Archive of all submitted files for the authenticated Administrative Officer.
+     * Returns a flat list of file entries across assigned and personal tasks whose
+     * user task status is submitted or completed, for easier searching on the client.
+     */
+    public function mySubmittedFiles(Request $request): JsonResponse
+    {
+        $this->ensureAdministrativeOfficer($request);
+
+        /** @var User $user */
+        $user = $request->user();
+
+        $submissions = Submission::with(['files', 'userTask.task'])
+            ->whereHas('userTask', function ($q) use ($user) {
+                $q->where('user_id', $user->id)
+                    ->whereIn('status', [UserTask::STATUS_SUBMITTED, UserTask::STATUS_COMPLETED]);
+            })
+            ->whereIn('type', ['upload', 'input'])
+            ->orderByDesc('created_at')
+            ->get();
+
+        $files = [];
+
+        foreach ($submissions as $submission) {
+            /** @var Submission $submission */
+            $userTask = $submission->userTask;
+            $task = $userTask?->task;
+            $userTaskItem = $userTask ? $this->userTaskToDashboardItem($userTask) : null;
+
+            foreach ($submission->files as $file) {
+                /** @var SubmissionFile $file */
+                $fileArray = $this->submissionFileToArray($file);
+
+                $files[] = [
+                    'id' => $fileArray['id'],
+                    'submission_id' => $fileArray['submission_id'],
+                    'user_task_id' => $userTask?->id,
+                    'task' => $task ? $this->taskToArray($task) : null,
+                    'user_task' => $userTaskItem,
+                    'original_name' => $fileArray['original_name'],
+                    'mime_type' => $fileArray['mime_type'],
+                    'size' => $fileArray['size'],
+                    'url' => $fileArray['url'],
+                    'uploaded_at' => $fileArray['created_at'],
+                    'submission_type' => $submission->type,
+                ];
+            }
+        }
+
+        return response()->json([
+            'files' => $files,
+        ]);
+    }
+
+    /**
      * List submissions (including files) for a given user task (Administrative Officer).
      * Phase 4.2: Used by Task Detail page to show uploaded MOVs.
      */
@@ -577,12 +785,6 @@ class TaskController extends Controller
             ], 422);
         }
 
-        if (in_array($userTask->status, [UserTask::STATUS_SUBMITTED, UserTask::STATUS_COMPLETED], true)) {
-            return response()->json([
-                'message' => 'This task has already been submitted or completed.',
-            ], 422);
-        }
-
         $validated = $request->validate([
             'period' => ['nullable', 'string', 'max:50'],
             'reference_no' => ['nullable', 'string', 'max:100'],
@@ -614,8 +816,73 @@ class TaskController extends Controller
 
         $submission->load('inputData');
 
+        ActivityLog::log(
+            $request->user()->id,
+            'submission_input_saved',
+            'Saved input data: ' . ($userTask->task?->name ?? 'Task'),
+            [
+                'user_task_id' => $userTask->id,
+                'task_id' => $userTask->task_id,
+                'submission_id' => $submission->id,
+            ],
+            $request
+        );
+
         return response()->json([
             'message' => 'Input data saved successfully.',
+            'submission' => $this->submissionToArray($submission),
+        ], 200);
+    }
+
+    /**
+     * Save or update notes for an upload-type submission (Administrative Officer).
+     * Creates the upload submission if it does not exist yet.
+     */
+    public function updateSubmissionNotes(Request $request, int $id): JsonResponse
+    {
+        $this->ensureAdministrativeOfficer($request);
+
+        /** @var UserTask $userTask */
+        $userTask = UserTask::where('user_id', $request->user()->id)
+            ->with('task')
+            ->findOrFail($id);
+
+        if ($userTask->task?->action !== Task::ACTION_UPLOAD) {
+            return response()->json([
+                'message' => 'Notes can only be saved for upload-type tasks.',
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'notes' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $submission = Submission::firstOrCreate(
+            [
+                'user_task_id' => $userTask->id,
+                'type' => 'upload',
+            ],
+            []
+        );
+
+        $submission->update(['notes' => $validated['notes'] ?? null]);
+        $submission->load('files');
+
+        ActivityLog::log(
+            $request->user()->id,
+            'submission_notes_saved',
+            'Saved submission notes: ' . ($userTask->task?->name ?? 'Task'),
+            [
+                'user_task_id' => $userTask->id,
+                'task_id' => $userTask->task_id,
+                'submission_id' => $submission->id,
+                'type' => 'upload',
+            ],
+            $request
+        );
+
+        return response()->json([
+            'message' => 'Notes saved successfully.',
             'submission' => $this->submissionToArray($submission),
         ], 200);
     }
@@ -697,6 +964,20 @@ class TaskController extends Controller
             $storedFiles[] = $this->submissionFileToArray($sf);
         }
 
+        ActivityLog::log(
+            $request->user()->id,
+            'mov_uploaded',
+            'Uploaded MOV file(s): ' . ($userTask->task?->name ?? 'Task'),
+            [
+                'user_task_id' => $userTask->id,
+                'task_id' => $userTask->task_id,
+                'submission_id' => $submission->id,
+                'submission_type' => $submissionType,
+                'file_count' => count($storedFiles),
+            ],
+            $request
+        );
+
         $message = $isInputTask
             ? 'Optional MOV file uploaded successfully.'
             : 'File(s) uploaded successfully.';
@@ -721,11 +1002,18 @@ class TaskController extends Controller
             ->with('task')
             ->findOrFail($id);
 
-        if (in_array($userTask->status, [UserTask::STATUS_SUBMITTED, UserTask::STATUS_COMPLETED], true)) {
+        if ($userTask->status === UserTask::STATUS_COMPLETED) {
             return response()->json([
-                'message' => 'This task has already been submitted.',
+                'message' => 'This task has already been validated and completed.',
                 'user_task' => $this->userTaskToDashboardItem($userTask),
             ], 422);
+        }
+
+        if ($userTask->status === UserTask::STATUS_SUBMITTED) {
+            return response()->json([
+                'message' => 'This task has already been submitted for validation.',
+                'user_task' => $this->userTaskToDashboardItem($userTask),
+            ]);
         }
 
         // For upload-type tasks, require at least one MOV file before submitting.
@@ -760,19 +1048,41 @@ class TaskController extends Controller
         // completed_at will be set when validation is approved (Phase 4.6/4.7).
         $userTask->save();
 
-        // Phase 6.6 — Notify School Head(s) that a validation is pending.
-        // This creates in-app reminders for School Heads, and optionally sends email.
+        ActivityLog::log(
+            $request->user()->id,
+            'task_submitted_for_validation',
+            'Submitted task for validation: ' . ($userTask->task?->name ?? 'Task'),
+            [
+                'user_task_id' => $userTask->id,
+                'task_id' => $userTask->task_id,
+                'due_date' => $userTask->due_date?->toDateString(),
+            ],
+            $request
+        );
+
+        // Phase 6.6 + AO–School Head scoping — Notify the assigned School Head(s)
+        // that a validation is pending. This creates in-app reminders for School
+        // Heads, and optionally sends email.
         if (config('reminders.school_head.enabled')) {
             /** @var User $ao */
             $ao = $request->user();
 
-            $schoolHeads = User::query()
-                ->where('role', 'school_head')
+            // Prefer explicit School Head–AO assignments.
+            $schoolHeads = $ao->supervisingSchoolHeads()
                 ->where('status', 'active')
-                ->when(is_string($ao->school_name) && $ao->school_name !== '', function ($q) use ($ao) {
-                    $q->where('school_name', $ao->school_name);
-                })
                 ->get();
+
+            // Fallback for legacy data: use the previous school_name-based logic
+            // when no explicit assignments exist yet.
+            if ($schoolHeads->isEmpty()) {
+                $schoolHeads = User::query()
+                    ->where('role', 'school_head')
+                    ->where('status', 'active')
+                    ->when(is_string($ao->school_name) && $ao->school_name !== '', function ($q) use ($ao) {
+                        $q->where('school_name', $ao->school_name);
+                    })
+                    ->get();
+            }
 
             // Use a consistent timestamp so repeated submits are idempotent at the DB level.
             $remindAt = now()->startOfMinute();
@@ -813,12 +1123,25 @@ class TaskController extends Controller
         $this->ensureSchoolHead($request);
 
         $schoolName = $request->query('school_name');
+        /** @var User $schoolHead */
+        $schoolHead = $request->user();
+
+        // Determine which Administrative Officers are explicitly assigned to this School Head.
+        $assignedAoIds = $schoolHead->supervisedAdministrativeOfficers()
+            ->pluck('users.id')
+            ->all();
 
         $submissions = Submission::with(['files', 'inputData', 'userTask.task', 'userTask.user'])
             ->whereIn('type', ['upload', 'input'])
             // Only tasks that are currently submitted
             ->whereHas('userTask', function ($q) {
                 $q->where('status', UserTask::STATUS_SUBMITTED);
+            })
+            // Restrict to AOs assigned to this School Head (if any assignments exist).
+            ->when(! empty($assignedAoIds), function ($q) use ($assignedAoIds) {
+                $q->whereHas('userTask.user', function ($uq) use ($assignedAoIds) {
+                    $uq->whereIn('id', $assignedAoIds);
+                });
             })
             // Optional filter by AO school_name
             ->when(is_string($schoolName) && $schoolName !== '', function ($q) use ($schoolName) {
@@ -829,6 +1152,14 @@ class TaskController extends Controller
             // Exclude submissions that already have an approved validation
             ->whereDoesntHave('validations', function ($q) {
                 $q->where('status', 'approved');
+            })
+            // Respect personal task visibility: School Heads only see personal
+            // tasks when the creator opted-in to validation visibility.
+            ->whereHas('userTask.task', function ($q) {
+                $q->where(function ($qq) {
+                    $qq->where('is_personal', false)
+                        ->orWhere('personal_visible_to_school_head', true);
+                });
             })
             ->orderByDesc('created_at')
             ->get();
@@ -895,11 +1226,243 @@ class TaskController extends Controller
 
         $userTask->refresh();
 
+        $submission->loadMissing(['userTask.user', 'userTask.task']);
+        ActivityLog::log(
+            $request->user()->id,
+            'submission_validated',
+            ($status === 'approved' ? 'Approved' : 'Rejected') . ' submission: ' . ($submission->userTask?->task?->name ?? 'Task'),
+            [
+                'submission_id' => $submission->id,
+                'status' => $status,
+                'user_task_id' => $submission->userTask?->id,
+                'task_id' => $submission->userTask?->task_id,
+                'target_user_id' => $submission->userTask?->user_id,
+            ],
+            $request
+        );
+
         return response()->json([
             'message' => $status === 'approved'
                 ? 'Submission approved successfully.'
                 : 'Submission rejected with feedback.',
             'user_task' => $this->userTaskToDashboardItem($userTask),
+        ]);
+    }
+
+    /**
+     * Task history for School Head: user_tasks of assigned AOs, for evaluation and reporting.
+     * Returns items and counts by status (all, pending, submitted, completed).
+     */
+    public function taskHistory(Request $request): JsonResponse
+    {
+        $this->ensureSchoolHead($request);
+
+        /** @var User $schoolHead */
+        $schoolHead = $request->user();
+        $assignedAoIds = $schoolHead->supervisedAdministrativeOfficers()
+            ->pluck('users.id')
+            ->all();
+
+        if (empty($assignedAoIds)) {
+            return response()->json([
+                'items' => [],
+                'counts' => ['all' => 0, 'pending' => 0, 'submitted' => 0, 'completed' => 0],
+            ]);
+        }
+
+        $taskVisibility = function ($q) {
+            $q->where(function ($qq) {
+                $qq->where('is_personal', false)
+                    ->orWhere('personal_visible_to_school_head', true);
+            });
+        };
+
+        $baseQuery = UserTask::with(['task', 'user'])
+            ->whereIn('user_id', $assignedAoIds)
+            ->whereHas('task', $taskVisibility);
+
+        $statusFilter = $request->query('status');
+        if (in_array($statusFilter, ['pending', 'submitted', 'completed'], true)) {
+            $baseQuery->where('status', $statusFilter);
+        }
+
+        $items = (clone $baseQuery)
+            ->orderByDesc('due_date')
+            ->orderByDesc('id')
+            ->limit(500)
+            ->get();
+
+        $countQuery = UserTask::with([])
+            ->whereIn('user_id', $assignedAoIds)
+            ->whereHas('task', $taskVisibility);
+
+        $counts = [
+            'all' => (clone $countQuery)->count(),
+            'pending' => (clone $countQuery)->where('status', UserTask::STATUS_PENDING)->count(),
+            'submitted' => (clone $countQuery)->where('status', UserTask::STATUS_SUBMITTED)->count(),
+            'completed' => (clone $countQuery)->where('status', UserTask::STATUS_COMPLETED)->count(),
+        ];
+
+        return response()->json([
+            'items' => $items->map(fn (UserTask $ut) => $this->userTaskToDashboardItem($ut)),
+            'counts' => $counts,
+        ]);
+    }
+
+    /**
+     * List supervised Administrative Officers for the current School Head (e.g. report dropdown).
+     * GET /api/school-head/supervised-officers
+     */
+    public function supervisedOfficers(Request $request): JsonResponse
+    {
+        $this->ensureSchoolHead($request);
+
+        /** @var User $schoolHead */
+        $schoolHead = $request->user();
+        $officers = $schoolHead->supervisedAdministrativeOfficers()
+            ->orderBy('users.name')
+            ->get(['users.id', 'users.name', 'users.school_name'])
+            ->map(fn (User $u) => [
+                'id' => $u->id,
+                'name' => $u->name,
+                'school_name' => $u->school_name,
+            ])
+            ->values()
+            ->all();
+
+        return response()->json(['officers' => $officers]);
+    }
+
+    /**
+     * Dashboard summary for School Head: KPIs and reminders in one response.
+     */
+    public function schoolHeadDashboard(Request $request): JsonResponse
+    {
+        $this->ensureSchoolHead($request);
+
+        /** @var User $schoolHead */
+        $schoolHead = $request->user();
+        $assignedAoIds = $schoolHead->supervisedAdministrativeOfficers()
+            ->pluck('users.id')
+            ->all();
+
+        $taskVisibility = function ($q) {
+            $q->where(function ($qq) {
+                $qq->where('is_personal', false)
+                    ->orWhere('personal_visible_to_school_head', true);
+            });
+        };
+
+        $pendingValidationsCount = 0;
+        if (! empty($assignedAoIds)) {
+            $pendingValidationsCount = Submission::query()
+                ->whereIn('type', ['upload', 'input'])
+                ->whereHas('userTask', function ($q) {
+                    $q->where('status', UserTask::STATUS_SUBMITTED);
+                })
+                ->whereHas('userTask.user', function ($uq) use ($assignedAoIds) {
+                    $uq->whereIn('id', $assignedAoIds);
+                })
+                ->whereDoesntHave('validations', function ($q) {
+                    $q->where('status', 'approved');
+                })
+                ->whereHas('userTask.task', $taskVisibility)
+                ->count();
+        }
+
+        $assignedPersonnelCount = count($assignedAoIds);
+
+        $reminders = Reminder::with(['userTask.task'])
+            ->where('user_id', $schoolHead->id)
+            ->where('status', Reminder::STATUS_UNREAD)
+            ->orderBy('remind_at')
+            ->limit(10)
+            ->get();
+
+        $remindersPayload = $reminders->map(function (Reminder $r): array {
+            $userTask = $r->relationLoaded('userTask') ? $r->userTask : null;
+            $task = $userTask?->relationLoaded('task') ? $userTask->task : null;
+            return [
+                'id' => $r->id,
+                'user_task_id' => $r->user_task_id,
+                'remind_at' => $r->remind_at?->toIso8601String(),
+                'channel' => $r->channel,
+                'type' => $r->type,
+                'days_before_due' => $r->days_before_due,
+                'status' => $r->status,
+                'read_at' => $r->read_at?->toIso8601String(),
+                'created_at' => $r->created_at?->toIso8601String(),
+                'updated_at' => $r->updated_at?->toIso8601String(),
+                'task' => $task ? ['id' => $task->id, 'name' => $task->name] : null,
+                'user_task' => $userTask ? [
+                    'id' => $userTask->id,
+                    'due_date' => $userTask->due_date?->toDateString(),
+                    'status' => $userTask->status,
+                ] : null,
+            ];
+        });
+
+        return response()->json([
+            'pending_validations_count' => $pendingValidationsCount,
+            'assigned_personnel_count' => $assignedPersonnelCount,
+            'reminders' => $remindersPayload,
+        ]);
+    }
+
+    /**
+     * Validation report for School Head: list of submissions this school head has validated,
+     * with task, personnel, decision (approved/rejected), remarks, and validated_at.
+     */
+    public function validationReport(Request $request): JsonResponse
+    {
+        $this->ensureSchoolHead($request);
+
+        $statusFilter = $request->query('status');
+        $query = Validation::with([
+            'submission.userTask.task',
+            'submission.userTask.user',
+        ])
+            ->where('validator_id', $request->user()->id);
+
+        if (in_array($statusFilter, ['approved', 'rejected'], true)) {
+            $query->where('status', $statusFilter);
+        }
+
+        $validations = $query
+            ->orderByDesc('validated_at')
+            ->limit(500)
+            ->get();
+
+        $counts = [
+            'all' => Validation::where('validator_id', $request->user()->id)->count(),
+            'approved' => Validation::where('validator_id', $request->user()->id)->where('status', 'approved')->count(),
+            'rejected' => Validation::where('validator_id', $request->user()->id)->where('status', 'rejected')->count(),
+        ];
+
+        $items = $validations->map(function (Validation $v) {
+            $sub = $v->submission;
+            $userTask = $sub?->userTask;
+            $task = $userTask?->task;
+            $user = $userTask?->user;
+            return [
+                'id' => $v->id,
+                'submission_id' => $v->submission_id,
+                'status' => $v->status,
+                'feedback' => $v->feedback,
+                'validated_at' => $v->validated_at?->toIso8601String(),
+                'task' => $task ? $this->taskToArray($task) : null,
+                'personnel' => $user ? [
+                    'id' => $user->id,
+                    'name' => $user->name,
+                    'email' => $user->email,
+                ] : null,
+                'due_date' => $userTask?->due_date?->format('Y-m-d'),
+            ];
+        });
+
+        return response()->json([
+            'items' => $items->all(),
+            'counts' => $counts,
         ]);
     }
 
@@ -914,6 +1477,7 @@ class TaskController extends Controller
             'action' => $t->action,
             'is_common' => $t->is_common,
             'common_report_no' => $t->common_report_no,
+            'is_personal' => $t->is_personal ?? false,
             'created_at' => $t->created_at->toIso8601String(),
             'updated_at' => $t->updated_at->toIso8601String(),
         ];
@@ -947,10 +1511,15 @@ class TaskController extends Controller
      */
     private function submissionToArray(Submission $s): array
     {
+        $notes = $s->type === 'input' && $s->relationLoaded('inputData') && $s->inputData
+            ? $s->inputData->notes
+            : $s->notes;
+
         return [
             'id' => $s->id,
             'user_task_id' => $s->user_task_id,
             'type' => $s->type,
+            'notes' => $notes,
             'created_at' => $s->created_at?->toIso8601String(),
             'updated_at' => $s->updated_at?->toIso8601String(),
             'files' => $s->relationLoaded('files')
@@ -995,8 +1564,10 @@ class TaskController extends Controller
             'size' => $sf->size,
             'created_at' => $sf->created_at?->toIso8601String(),
             'updated_at' => $sf->updated_at?->toIso8601String(),
-            // Direct URL for downloads/previews (public disk = APP_URL/storage/{path}).
+            // Direct URL for previews (public disk = APP_URL/storage/{path}).
             'url' => Storage::disk($sf->disk)->url($sf->path),
+            // API download URL (Content-Disposition: attachment) to trigger direct download.
+            'download_url' => url('/api/submission-files/'.$sf->id.'/download'),
         ];
     }
 
@@ -1023,6 +1594,52 @@ class TaskController extends Controller
         return $disk->response($path, $name, [
             'Content-Type' => $mimeType ?: 'application/octet-stream',
         ]);
+    }
+
+    /**
+     * Download a submission file as an attachment.
+     * Allowed: Administrative Officer (own files only); School Head (files from submissions of assigned AOs).
+     */
+    public function downloadSubmissionFile(Request $request, int $id): StreamedResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+
+        /** @var SubmissionFile $file */
+        $file = SubmissionFile::with('submission.userTask.user')
+            ->findOrFail($id);
+
+        $userTask = $file->submission?->userTask;
+        if (! $userTask) {
+            abort(404, 'File not found.');
+        }
+
+        $allowed = false;
+        if ($user->role === 'administrative_officer' && $userTask->user_id === $user->id) {
+            $allowed = true;
+        }
+        if ($user->role === 'school_head') {
+            $assignedAoIds = $user->supervisedAdministrativeOfficers()->pluck('users.id')->all();
+            if (in_array($userTask->user_id, $assignedAoIds, true)) {
+                $allowed = true;
+            }
+        }
+
+        if (! $allowed) {
+            abort(403, 'You are not allowed to download this file.');
+        }
+
+        $disk = Storage::disk($file->disk);
+        if (! $disk->exists($file->path)) {
+            abort(404, 'File not found.');
+        }
+
+        $downloadName = $file->original_name ?: basename($file->path);
+
+        return $disk->download($file->path, $downloadName);
     }
 
     /**

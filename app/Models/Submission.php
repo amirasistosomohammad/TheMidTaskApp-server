@@ -20,6 +20,7 @@ class Submission extends Model
     protected $fillable = [
         'user_task_id',
         'type',
+        'notes',
     ];
 
     /**
