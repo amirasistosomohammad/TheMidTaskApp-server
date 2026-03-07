@@ -69,6 +69,12 @@ class ReportController extends Controller
      */
     public function performanceReport(Request $request): StreamedResponse|Response|JsonResponse
     {
+        // Report generation can be slow (template load, queries, Excel write). Avoid 504 in deployment.
+        set_time_limit(120);
+        if (function_exists('ini_set')) {
+            @ini_set('memory_limit', '256M');
+        }
+
         $user = $request->user();
         $role = $user->role;
 

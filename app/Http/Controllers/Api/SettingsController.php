@@ -22,10 +22,23 @@ class SettingsController extends Controller
         }
     }
 
+    /**
+     * Normalize a storage URL so it works in deployment (fix typos like "https//" or "http://https//").
+     */
+    private static function normalizeLogoUrl(?string $url): ?string
+    {
+        if ($url === null || $url === '') {
+            return null;
+        }
+        $url = preg_replace('#^http://https?//#', 'https://', $url);
+        $url = preg_replace('#^https//#', 'https://', $url);
+        return $url;
+    }
+
     private function settingsResponse(SystemSetting $s): JsonResponse
     {
         $logoUrl = $s->logo_path
-            ? Storage::disk('public')->url($s->logo_path)
+            ? self::normalizeLogoUrl(Storage::disk('public')->url($s->logo_path))
             : null;
 
         return response()->json([

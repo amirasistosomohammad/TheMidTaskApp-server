@@ -42,9 +42,14 @@ return [
             'driver' => 'local',
             'root' => storage_path('app/public'),
             // Use STORAGE_PUBLIC_URL in production so logo/asset URLs are correct (HTTPS). Falls back to APP_URL.
-            'url' => env('STORAGE_PUBLIC_URL')
-                ? rtrim(env('STORAGE_PUBLIC_URL'), '/').'/storage'
-                : rtrim(env('APP_URL', 'http://localhost'), '/').'/storage',
+            // Normalize base URL to fix deployment typos (e.g. "https//" -> "https://", "http://https//" -> "https://").
+            'url' => (function () {
+                $base = env('STORAGE_PUBLIC_URL') ?: env('APP_URL', 'http://localhost');
+                $base = rtrim((string) $base, '/');
+                $base = preg_replace('#^http://https?//#', 'https://', $base);
+                $base = preg_replace('#^https//#', 'https://', $base);
+                return $base . '/storage';
+            })(),
             'visibility' => 'public',
             'throw' => false,
             'report' => false,

@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SchoolHeadAssignmentController;
 use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\ReportController;
+use App\Http\Controllers\Api\SchedulerController;
 
 /*
 |--------------------------------------------------------------------------
@@ -30,6 +31,10 @@ Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 
 // System settings (public — used by layout/login for app name & logo)
 Route::get('/settings', [SettingsController::class, 'index']);
+
+// Scheduler trigger for deployment: when SCHEDULER_TOKEN is set, call GET/POST /api/scheduler/run?token=YOUR_TOKEN
+// (or header X-Scheduler-Token) every minute from an external cron or platform scheduled job so backup/reminders run.
+Route::match(['get', 'post'], '/scheduler/run', [SchedulerController::class, 'run']);
 
 // Serve stored files (MOVs, avatars) – public so img preview and "View file" work without auth redirect.
 // Paths are unguessable (e.g. movs/78/random-string.png). Must be registered before auth group.
