@@ -8,7 +8,7 @@ use App\Models\BackupSetting;
 use App\Models\Task;
 use App\Models\User;
 use App\Models\UserTask;
-use App\Jobs\AssignDefaultTasksJob;
+use App\Services\AssignDefaultTasksService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,7 +20,9 @@ use Illuminate\Support\Facades\Storage;
  */
 class AdminController extends Controller
 {
-    public function __construct() {}
+    public function __construct(
+        private AssignDefaultTasksService $assignDefaultTasksService
+    ) {}
 
     private function ensureCentralAdmin(Request $request): void
     {
@@ -284,7 +286,7 @@ class AdminController extends Controller
         $remarks = $request->input('remarks');
         $assignDefaultTasks = filter_var($request->input('assign_default_tasks'), FILTER_VALIDATE_BOOLEAN);
 
-        DB::transaction(function () use ($user, $remarks) {
+        DB::transaction(function () use ($user, $remarks, $assignDefaultTasks) {
             $user->update([
                 'status' => 'active',
                 'approved_at' => now(),
@@ -292,11 +294,11 @@ class AdminController extends Controller
                 'rejected_at' => null,
                 'rejection_remarks' => null,
             ]);
-        });
 
-        if ($assignDefaultTasks && $user->role === 'administrative_officer') {
-            AssignDefaultTasksJob::dispatch($user->id);
-        }
+            if ($assignDefaultTasks && $user->role === 'administrative_officer') {
+                $this->assignDefaultTasksService->assign($user);
+            }
+        });
 
         ActivityLog::log($request->user()->id, 'user_approved', 'Approved account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
 

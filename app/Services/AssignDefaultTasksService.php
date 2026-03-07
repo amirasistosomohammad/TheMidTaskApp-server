@@ -6,19 +6,31 @@ use App\Models\Task;
 use App\Models\User;
 use App\Models\UserTask;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Assigns standard (non-personal) tasks from the central Task list to an Administrative Officer.
- * Used when approving a user with "Assign standard tasks" checked, and by AssignDefaultTasksJob.
+ * Optimized for inline execution: fewer occurrences per task, single existing-lookup, bulk insert.
  */
 class AssignDefaultTasksService
 {
+    /** Lighter occurrence counts so approval stays fast (no queue). */
+    private const SCHEDULE_COUNTS = [
+        Task::FREQUENCY_MONTHLY => 6,
+        Task::FREQUENCY_TWICE_A_YEAR => 2,
+        Task::FREQUENCY_QUARTERLY => 2,
+        Task::FREQUENCY_EVERY_TWO_MONTHS => 3,
+        Task::FREQUENCY_YEARLY => 1,
+        Task::FREQUENCY_END_OF_SY => 1,
+        'once_or_twice_a_year' => 2,
+    ];
+
     public function __construct(
         private DueDateService $dueDateService
     ) {}
 
     /**
-     * Create upcoming user_tasks for the officer so their timeline is populated on first sign-in.
+     * Create upcoming user_tasks for the officer. One query to load existing, one bulk insert.
      */
     public function assign(User $user): void
     {
@@ -32,46 +44,62 @@ class AssignDefaultTasksService
             ->orderBy('name')
             ->get();
 
-        $today = Carbon::now()->startOfDay();
+        if ($tasks->isEmpty()) {
+            return;
+        }
 
+        $existing = $this->existingPendingKeys($user->id);
+
+        $today = Carbon::now()->startOfDay();
+        $now = now();
+        $rows = [];
+
+        /** @var Task $task */
         foreach ($tasks as $task) {
-            $count = $this->defaultScheduleCount($task);
+            $count = self::SCHEDULE_COUNTS[$task->frequency] ?? 1;
             $dates = $this->dueDateService->generateDueDates($task, $today, $count);
 
             foreach ($dates as $d) {
                 $due = $d->format('Y-m-d');
-
-                $exists = UserTask::where('user_id', $user->id)
-                    ->where('task_id', $task->id)
-                    ->whereDate('due_date', $due)
-                    ->where('status', UserTask::STATUS_PENDING)
-                    ->exists();
-                if ($exists) {
+                $key = $task->id . '|' . $due;
+                if (isset($existing[$key])) {
                     continue;
                 }
+                $existing[$key] = true;
 
-                UserTask::create([
+                $rows[] = [
                     'user_id' => $user->id,
                     'task_id' => $task->id,
                     'due_date' => $due,
                     'status' => UserTask::STATUS_PENDING,
                     'period_covered' => $d->format('Y-m'),
-                ]);
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
+            }
+        }
+
+        if ($rows !== []) {
+            foreach (array_chunk($rows, 100) as $chunk) {
+                UserTask::insert($chunk);
             }
         }
     }
 
-    private function defaultScheduleCount(Task $task): int
+    /** @return array<string, true> key = "task_id|due_date" */
+    private function existingPendingKeys(int $userId): array
     {
-        return match ($task->frequency) {
-            Task::FREQUENCY_MONTHLY => 12,
-            Task::FREQUENCY_TWICE_A_YEAR => 2,
-            Task::FREQUENCY_QUARTERLY => 4,
-            Task::FREQUENCY_EVERY_TWO_MONTHS => 6,
-            Task::FREQUENCY_YEARLY,
-            Task::FREQUENCY_END_OF_SY => 1,
-            'once_or_twice_a_year' => 2,
-            default => 1,
-        };
+        $pairs = UserTask::where('user_id', $userId)
+            ->where('status', UserTask::STATUS_PENDING)
+            ->get(['task_id', 'due_date']);
+
+        $out = [];
+        foreach ($pairs as $row) {
+            $due = $row->due_date instanceof \Carbon\Carbon
+                ? $row->due_date->format('Y-m-d')
+                : $row->due_date;
+            $out[$row->task_id . '|' . $due] = true;
+        }
+        return $out;
     }
 }
