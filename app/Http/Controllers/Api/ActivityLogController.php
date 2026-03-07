@@ -69,8 +69,8 @@ class ActivityLogController extends Controller
 
         $items = $paginator->getCollection()->map(function (ActivityLog $log) {
             $createdAt = $log->created_at;
-            // DB stores server local time (e.g. Asia/Manila); interpret as that then convert to UTC for API.
-            $storageTz = 'Asia/Manila';
+            // Interpret DB value in configured storage TZ (e.g. Asia/Manila or UTC in production) and return UTC ISO for API.
+            $storageTz = config('app.activity_log_storage_timezone', 'UTC');
             $utcIso = $createdAt
                 ? Carbon::parse($createdAt->format('Y-m-d H:i:s'), $storageTz)->setTimezone('UTC')->toIso8601String()
                 : null;

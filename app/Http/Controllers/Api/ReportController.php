@@ -11,6 +11,7 @@ use App\Models\Validation;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -213,72 +214,75 @@ class ReportController extends Controller
         ]);
     }
 
+    /**
+     * Timeliness: % of completed/submitted tasks in period that were completed on or before due date.
+     * Uses a single aggregate query to avoid loading all rows (prevents timeout on large ranges).
+     */
     private function timelinessPercent(int $userId, string $dateFrom, string $dateTo): float
     {
-        $allInPeriod = UserTask::query()
+        $completedStatuses = [UserTask::STATUS_COMPLETED, UserTask::STATUS_SUBMITTED];
+
+        $totalCompleted = UserTask::query()
             ->where('user_id', $userId)
             ->whereDate('due_date', '>=', $dateFrom)
             ->whereDate('due_date', '<=', $dateTo)
-            ->get();
+            ->whereIn('status', $completedStatuses)
+            ->count();
 
-        if ($allInPeriod->isEmpty()) {
+        if ($totalCompleted === 0) {
             return 0.0;
         }
 
-        $onTimeCount = 0;
-        foreach ($allInPeriod as $ut) {
-            if (! in_array($ut->status, [UserTask::STATUS_COMPLETED, UserTask::STATUS_SUBMITTED], true)) {
-                continue;
-            }
-            $completedAt = $ut->completed_at ?? $ut->updated_at;
-            if (! $completedAt) {
-                continue;
-            }
-            $due = $ut->due_date ? \Carbon\Carbon::parse($ut->due_date)->endOfDay() : null;
-            if ($due && $completedAt->lte($due)) {
-                $onTimeCount++;
-            }
-        }
+        $onTimeCount = UserTask::query()
+            ->where('user_id', $userId)
+            ->whereDate('due_date', '>=', $dateFrom)
+            ->whereDate('due_date', '<=', $dateTo)
+            ->whereIn('status', $completedStatuses)
+            ->whereNotNull('completed_at')
+            ->whereRaw('DATE(completed_at) <= due_date')
+            ->count();
 
-        return round(($onTimeCount / $allInPeriod->count()) * 100, 2);
+        return round(($onTimeCount / $totalCompleted) * 100, 2);
     }
 
+    /**
+     * Quality: % of submissions (in period) that have an approved validation.
+     * Uses count queries only—no loading of submission collections (prevents timeout).
+     */
     private function qualityPercent(int $userId, string $dateFrom, string $dateTo): float
     {
-        $submissions = Submission::query()
+        $submissionCount = Submission::query()
             ->whereHas('userTask', function ($q) use ($userId, $dateFrom, $dateTo) {
                 $q->where('user_id', $userId)
                     ->whereDate('due_date', '>=', $dateFrom)
                     ->whereDate('due_date', '<=', $dateTo);
             })
-            ->get();
+            ->count();
 
-        if ($submissions->isEmpty()) {
+        if ($submissionCount === 0) {
             return 0.0;
         }
 
-        $approved = Validation::query()
-            ->whereIn('submission_id', $submissions->pluck('id'))
+        $approvedCount = Validation::query()
             ->where('status', 'approved')
+            ->whereHas('submission.userTask', function ($q) use ($userId, $dateFrom, $dateTo) {
+                $q->where('user_id', $userId)
+                    ->whereDate('due_date', '>=', $dateFrom)
+                    ->whereDate('due_date', '<=', $dateTo);
+            })
             ->count();
 
-        return round(($approved / $submissions->count()) * 100, 2);
+        return round(($approvedCount / $submissionCount) * 100, 2);
     }
 
     /**
+     * Task breakdown: one row per task with completed/total and frequency.
+     * Uses a single grouped query instead of loading all user_tasks (prevents timeout).
+     *
      * @return array<int, array{name: string, completed: int, total: int, frequency: string, percentage: string}>
      */
     private function breakdownRows(int $userId, string $dateFrom, string $dateTo): array
     {
-        $rows = UserTask::query()
-            ->where('user_id', $userId)
-            ->whereDate('due_date', '>=', $dateFrom)
-            ->whereDate('due_date', '<=', $dateTo)
-            ->with('task')
-            ->get()
-            ->groupBy('task_id');
-
-        $result = [];
         $frequencyLabels = [
             'monthly' => 'Monthly',
             'quarterly' => 'Quarterly',
@@ -289,15 +293,30 @@ class ReportController extends Controller
             'one_time' => 'One time',
         ];
 
-        foreach ($rows as $taskId => $userTasks) {
-            $task = $userTasks->first()->task;
-            $total = $userTasks->count();
-            $completed = $userTasks->whereIn('status', [UserTask::STATUS_COMPLETED, UserTask::STATUS_SUBMITTED])->count();
-            $pct = $total > 0 ? round(($completed / $total) * 100, 2) : 0;
-            $freq = $frequencyLabels[$task->frequency ?? ''] ?? $task->frequency ?? '—';
+        $statusList = "'" . UserTask::STATUS_COMPLETED . "','" . UserTask::STATUS_SUBMITTED . "'";
+        $rows = UserTask::query()
+            ->where('user_tasks.user_id', $userId)
+            ->whereDate('user_tasks.due_date', '>=', $dateFrom)
+            ->whereDate('user_tasks.due_date', '<=', $dateTo)
+            ->join('tasks', 'tasks.id', '=', 'user_tasks.task_id')
+            ->select([
+                'tasks.id as task_id',
+                'tasks.name as task_name',
+                'tasks.frequency',
+                DB::raw('COUNT(*) as total'),
+                DB::raw("SUM(CASE WHEN user_tasks.status IN ({$statusList}) THEN 1 ELSE 0 END) as completed"),
+            ])
+            ->groupBy('tasks.id', 'tasks.name', 'tasks.frequency')
+            ->get();
 
+        $result = [];
+        foreach ($rows as $row) {
+            $total = (int) $row->total;
+            $completed = (int) $row->completed;
+            $pct = $total > 0 ? round(($completed / $total) * 100, 2) : 0;
+            $freq = $frequencyLabels[$row->frequency ?? ''] ?? $row->frequency ?? '—';
             $result[] = [
-                'name' => $task->name,
+                'name' => $row->task_name,
                 'completed' => $completed,
                 'total' => $total,
                 'frequency' => $freq,

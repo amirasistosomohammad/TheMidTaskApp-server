@@ -89,7 +89,7 @@ class AdminController extends Controller
             ->get()
             ->map(function (ActivityLog $log) {
                 $createdAt = $log->created_at;
-                $storageTz = 'Asia/Manila';
+                $storageTz = config('app.activity_log_storage_timezone', 'UTC');
                 $utcIso = $createdAt
                     ? Carbon::parse($createdAt->format('Y-m-d H:i:s'), $storageTz)->setTimezone('UTC')->toIso8601String()
                     : null;
