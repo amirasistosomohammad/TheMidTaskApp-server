@@ -8,7 +8,7 @@ use App\Models\BackupSetting;
 use App\Models\Task;
 use App\Models\User;
 use App\Models\UserTask;
-use App\Services\DueDateService;
+use App\Jobs\AssignDefaultTasksJob;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,9 +20,7 @@ use Illuminate\Support\Facades\Storage;
  */
 class AdminController extends Controller
 {
-    public function __construct(
-        private DueDateService $dueDateService
-    ) {}
+    public function __construct() {}
 
     private function ensureCentralAdmin(Request $request): void
     {
@@ -286,7 +284,7 @@ class AdminController extends Controller
         $remarks = $request->input('remarks');
         $assignDefaultTasks = filter_var($request->input('assign_default_tasks'), FILTER_VALIDATE_BOOLEAN);
 
-        DB::transaction(function () use ($user, $remarks, $assignDefaultTasks) {
+        DB::transaction(function () use ($user, $remarks) {
             $user->update([
                 'status' => 'active',
                 'approved_at' => now(),
@@ -294,11 +292,12 @@ class AdminController extends Controller
                 'rejected_at' => null,
                 'rejection_remarks' => null,
             ]);
-
-            if ($assignDefaultTasks && $user->role === 'administrative_officer') {
-                $this->assignDefaultTasksToUser($user);
-            }
         });
+
+        if ($assignDefaultTasks && $user->role === 'administrative_officer') {
+            AssignDefaultTasksJob::dispatch($user->id);
+        }
+
         ActivityLog::log($request->user()->id, 'user_approved', 'Approved account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
 
         return response()->json([
@@ -312,72 +311,6 @@ class AdminController extends Controller
                 'approved_remarks' => $user->approved_remarks,
             ],
         ]);
-    }
-
-    /**
-     * Assign standard tasks from the central Task list to an Administrative Officer.
-     *
-     * Creates multiple upcoming user_tasks per task (based on frequency) so the
-     * officer's timeline is populated on first sign-in.
-     */
-    private function assignDefaultTasksToUser(User $user): void
-    {
-        // Use the same ordering as the Task list for a predictable set,
-        // excluding personal tasks which are created directly by officers.
-        $tasks = Task::where('is_personal', false)
-            ->orderBy('is_common', 'desc')
-            ->orderBy('common_report_no')
-            ->orderBy('name')
-            ->get();
-
-        $today = now()->startOfDay();
-
-        /** @var Task $task */
-        foreach ($tasks as $task) {
-            $count = $this->defaultScheduleCount($task);
-            $dates = $this->dueDateService->generateDueDates($task, $today, $count);
-
-            foreach ($dates as $d) {
-                $due = $d->format('Y-m-d');
-
-                // Avoid duplicate pending assignments for same user/task/due_date
-                // when approving users multiple times or re-running default assignment.
-                $exists = UserTask::where('user_id', $user->id)
-                    ->where('task_id', $task->id)
-                    ->whereDate('due_date', $due)
-                    ->where('status', UserTask::STATUS_PENDING)
-                    ->exists();
-                if ($exists) {
-                    continue;
-                }
-
-                UserTask::create([
-                    'user_id' => $user->id,
-                    'task_id' => $task->id,
-                    'due_date' => $due,
-                    'status' => UserTask::STATUS_PENDING,
-                    'period_covered' => $d->format('Y-m'),
-                ]);
-            }
-        }
-    }
-
-    /**
-     * How many upcoming occurrences to pre-generate for a task's schedule so
-     * personnel timelines look complete and professional.
-     */
-    private function defaultScheduleCount(Task $task): int
-    {
-        return match ($task->frequency) {
-            Task::FREQUENCY_MONTHLY => 12,          // next 12 months
-            Task::FREQUENCY_TWICE_A_YEAR => 2,      // this year's two months
-            Task::FREQUENCY_QUARTERLY => 4,         // four quarters
-            Task::FREQUENCY_EVERY_TWO_MONTHS => 6,  // six bimonthly periods
-            Task::FREQUENCY_YEARLY,
-            Task::FREQUENCY_END_OF_SY => 1,         // one per year
-            'once_or_twice_a_year' => 2,
-            default => 1,
-        };
     }
 
     /**
