@@ -280,33 +280,33 @@ class ReportController extends Controller
         $sheet->setCellValue('B42', $schoolHeadName);
         $sheet->setCellValue('B43', $schoolHeadPosition);
 
-        // Unmerge cells above the name (B39–B41) so the signature image is not hidden by merged cells.
-        $validatedByCells = ['B39', 'B40', 'B41', 'C39', 'C40', 'C41'];
-        $validatedByMergesToUnmerge = [];
-        foreach ($sheet->getMergeCells() as $mergeRange) {
-            foreach ($validatedByCells as $cell) {
-                if (Coordinate::coordinateIsInsideRange($mergeRange, $cell)) {
-                    $validatedByMergesToUnmerge[$mergeRange] = true;
-                    break;
+        try {
+            // Unmerge cells above the name (B39–B41) so the signature image is not hidden by merged cells.
+            $validatedByCells = ['B39', 'B40', 'B41', 'C39', 'C40', 'C41'];
+            $validatedByMergesToUnmerge = [];
+            foreach ($sheet->getMergeCells() as $mergeRange) {
+                foreach ($validatedByCells as $cell) {
+                    if (Coordinate::coordinateIsInsideRange($mergeRange, $cell)) {
+                        $validatedByMergesToUnmerge[$mergeRange] = true;
+                        break;
+                    }
                 }
             }
-        }
-        foreach (array_keys($validatedByMergesToUnmerge) as $mergeRange) {
-            $sheet->unmergeCells($mergeRange);
-        }
+            foreach (array_keys($validatedByMergesToUnmerge) as $mergeRange) {
+                $sheet->unmergeCells($mergeRange);
+            }
 
-        // If the designated school head has a digital signature, place it in B41 (directly above the name).
-        if ($schoolHead) {
-            $schoolHeadWithSignature = User::select(['id', 'name', 'position', 'signature_url'])->find($schoolHead->id);
-            if ($schoolHeadWithSignature?->signature_url) {
-                $signaturePath = $this->resolveSignatureUrlToPath($schoolHeadWithSignature->signature_url);
-                if (! $signaturePath && $this->isAppUrl($schoolHeadWithSignature->signature_url)) {
-                    $signaturePath = $this->fetchSignatureToTempFile($schoolHeadWithSignature->signature_url);
-                }
-                if ($signaturePath && is_readable($signaturePath)) {
-                    $signaturePath = realpath($signaturePath) ?: $signaturePath;
-                    $signaturePath = str_replace('\\', '/', $signaturePath);
-                    try {
+            // If the designated school head has a digital signature, place it in B41 (directly above the name).
+            if ($schoolHead) {
+                $schoolHeadWithSignature = User::select(['id', 'name', 'position', 'signature_url'])->find($schoolHead->id);
+                if ($schoolHeadWithSignature?->signature_url) {
+                    $signaturePath = $this->resolveSignatureUrlToPath($schoolHeadWithSignature->signature_url);
+                    if (! $signaturePath && $this->isAppUrl($schoolHeadWithSignature->signature_url)) {
+                        $signaturePath = $this->fetchSignatureToTempFile($schoolHeadWithSignature->signature_url);
+                    }
+                    if ($signaturePath && is_readable($signaturePath)) {
+                        $signaturePath = realpath($signaturePath) ?: $signaturePath;
+                        $signaturePath = str_replace('\\', '/', $signaturePath);
                         $drawing = new Drawing();
                         $drawing->setName('SchoolHeadSignature');
                         $drawing->setPath($signaturePath);
@@ -314,11 +314,12 @@ class ReportController extends Controller
                         $drawing->setWidth(100);
                         $drawing->setHeight(45);
                         $drawing->setWorksheet($sheet);
-                    } catch (\Throwable $e) {
-                        // If image cannot be embedded, skip without breaking the report
                     }
                 }
             }
+        } catch (\Throwable $e) {
+            // Do not fail report generation: skip signature/unmerge if anything throws (e.g. production path, template merge).
+            report($e);
         }
 
         $dateTimeLabel = now(config('app.timezone'))->format('F j, Y g:i A');
@@ -450,14 +451,15 @@ class ReportController extends Controller
 
     /**
      * Resolve school head signature_url to local filesystem path.
-     * Handles: full URL with /storage/signatures/..., relative path signatures/..., or filename in signatures folder.
+     * Handles: full URL with /storage/signatures/..., path with app prefix (e.g. /themidtaskapp-server/storage/...), or signatures/...
      */
     private function resolveSignatureUrlToPath(string $signatureUrl): ?string
     {
         $pathPart = parse_url($signatureUrl, PHP_URL_PATH);
         $pathPart = is_string($pathPart) ? ltrim($pathPart, '/') : trim($signatureUrl, '/');
         $relativePath = null;
-        if (preg_match('#^storage/(.+)$#', $pathPart, $m)) {
+        // Match .../storage/signatures/... or storage/signatures/... (production may have path prefix)
+        if (preg_match('#(?:^|/)storage/(.+)$#', $pathPart, $m)) {
             $relativePath = $m[1];
         } elseif (str_starts_with($pathPart, 'signatures/')) {
             $relativePath = $pathPart;
