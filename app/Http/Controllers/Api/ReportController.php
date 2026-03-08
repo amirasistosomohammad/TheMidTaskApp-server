@@ -418,7 +418,7 @@ class ReportController extends Controller
         ]);
 
         // 7) Hide unused columns to the right of the table (G–J) so the sheet doesn’t look empty; template width unchanged
-        foreach (['G', 'H', 'I', 'J'] as $col) {
+        foreach (['H', 'I', 'J'] as $col) {
             $sheet->getColumnDimension($col)->setVisible(false);
         }
 
