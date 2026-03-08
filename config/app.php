@@ -74,7 +74,7 @@ return [
     |
     */
 
-    'timezone' => 'UTC',
+    'timezone' => env('APP_TIMEZONE', 'UTC'),
 
     /*
     | Timezone in which activity_logs.created_at is stored (e.g. server/MySQL local).

@@ -31,6 +31,7 @@ class User extends Authenticatable
         'division',
         'school_name',
         'avatar_url',
+        'signature_url',
         'email_verified_at',
         'otp',
         'otp_expires_at',

@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\SchoolHeadAssignmentController;
 use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\SchedulerController;
+use App\Http\Controllers\Api\SchoolHeadProfileController;
 
 /*
 |--------------------------------------------------------------------------
@@ -118,6 +119,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // School Head: task history
     Route::get('/school-head/task-history', [TaskController::class, 'taskHistory']);
+
+    // School Head: digital signature (upload/remove, used in Excel reports)
+    Route::get('/school-head/profile/signature', [SchoolHeadProfileController::class, 'getSignature']);
+    Route::post('/school-head/profile/signature', [SchoolHeadProfileController::class, 'updateSignature']);
 
     // Performance report (Personnel: own report; School Head: report for supervised AO)
     Route::get('/reports/template-status', [ReportController::class, 'templateStatus']);
