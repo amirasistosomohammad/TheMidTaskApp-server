@@ -8,6 +8,7 @@ use App\Models\SystemSetting;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 
 /**
  * CA-SET-1.3: GET system settings (public, for layout).
@@ -23,23 +24,19 @@ class SettingsController extends Controller
     }
 
     /**
-     * Normalize a storage URL so it works in deployment (fix typos like "https//" or "http://https//").
+     * Build logo URL so it works in deployment. Use the API storage route (GET /api/storage/{path})
+     * so the file is served by Laravel instead of the web server—avoids 403 when public/storage
+     * symlink is missing or blocked (e.g. DigitalOcean App Platform).
      */
-    private static function normalizeLogoUrl(?string $url): ?string
-    {
-        if ($url === null || $url === '') {
-            return null;
-        }
-        $url = preg_replace('#^http://https?//#', 'https://', $url);
-        $url = preg_replace('#^https//#', 'https://', $url);
-        return $url;
-    }
-
     private function settingsResponse(SystemSetting $s): JsonResponse
     {
-        $logoUrl = $s->logo_path
-            ? self::normalizeLogoUrl(Storage::disk('public')->url($s->logo_path))
-            : null;
+        $logoUrl = null;
+        if ($s->logo_path) {
+            $path = ltrim(str_replace(['../', '..\\'], '', $s->logo_path), '/');
+            if ($path !== '' && ! str_contains($path, '..')) {
+                $logoUrl = URL::to('api/storage/' . $path);
+            }
+        }
 
         return response()->json([
             'app_name' => $s->app_name,
