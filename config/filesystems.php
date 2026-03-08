@@ -42,13 +42,17 @@ return [
             'driver' => 'local',
             'root' => storage_path('app/public'),
             // Use STORAGE_PUBLIC_URL in production so logo/asset URLs are correct (HTTPS). Falls back to APP_URL.
-            // Normalize base URL to fix deployment typos (e.g. "https//" -> "https://", "http://https//" -> "https://").
+            // Normalize base URL: force HTTPS when not localhost (avoids Mixed Content in deployment).
             // Must include /api so URLs match the actual route (api.php is mounted at /api).
             'url' => (function () {
                 $base = env('STORAGE_PUBLIC_URL') ?: env('APP_URL', 'http://localhost');
                 $base = rtrim((string) $base, '/');
                 $base = preg_replace('#^http://https?//#', 'https://', $base);
                 $base = preg_replace('#^https//#', 'https://', $base);
+                $host = parse_url($base, PHP_URL_HOST);
+                if ($host && $host !== 'localhost' && ! preg_match('#^127\.#', (string) $host)) {
+                    $base = 'https://' . preg_replace('#^https?://#i', '', $base);
+                }
                 return $base . '/api/storage';
             })(),
             'visibility' => 'public',
