@@ -358,25 +358,26 @@ class ReportController extends Controller
             $sheet->unmergeCells($mergeRange);
         }
 
-        // 2) Wipe and rebuild: title row
-        for ($col = 'B'; $col <= 'F'; $col++) {
+        // 2) Wipe and rebuild: title row (span B–G so no empty column between table and Scenario 3)
+        for ($col = 'B'; $col <= 'G'; $col++) {
             $sheet->setCellValue($col . $breakdownTitleRow, '');
         }
         $sheet->setCellValue('B' . $breakdownTitleRow, 'BREAKDOWN ANALYSIS');
-        $sheet->mergeCells('B' . $breakdownTitleRow . ':F' . $breakdownTitleRow);
+        $sheet->mergeCells('B' . $breakdownTitleRow . ':G' . $breakdownTitleRow);
         $sheet->getStyle('B' . $breakdownTitleRow)->getFont()->setBold(true);
         $sheet->getStyle('B' . $breakdownTitleRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
 
-        // 3) Headers row: NUCLEAR – NO template width change. Full header text via WRAP only: size 11, shrink OFF, wrap ON.
+        // 3) Headers row: NUCLEAR – NO template width change. Full header text via WRAP only: size 11, shrink OFF, wrap ON. Merge F:G for Percentage so no unused column.
         $sheet->setCellValue('B' . $breakdownHeaderRow, 'Name of Task');
         $sheet->setCellValue('C' . $breakdownHeaderRow, 'Completed');
         $sheet->setCellValue('D' . $breakdownHeaderRow, 'No. of Task');
         $sheet->setCellValue('E' . $breakdownHeaderRow, 'Frequency');
         $sheet->setCellValue('F' . $breakdownHeaderRow, 'Percentage');
-        $headerRange = 'B' . $breakdownHeaderRow . ':F' . $breakdownHeaderRow;
+        $sheet->mergeCells('F' . $breakdownHeaderRow . ':G' . $breakdownHeaderRow);
+        $headerRange = 'B' . $breakdownHeaderRow . ':G' . $breakdownHeaderRow;
         $sheet->getStyle($headerRange)->getFont()->setBold(true)->setSize(11);
         $sheet->getStyle('B' . $breakdownHeaderRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT)->setVertical(Alignment::VERTICAL_CENTER)->setWrapText(true)->setShrinkToFit(false);
-        $sheet->getStyle('C' . $breakdownHeaderRow . ':F' . $breakdownHeaderRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER)->setVertical(Alignment::VERTICAL_CENTER)->setWrapText(true)->setShrinkToFit(false);
+        $sheet->getStyle('C' . $breakdownHeaderRow . ':G' . $breakdownHeaderRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER)->setVertical(Alignment::VERTICAL_CENTER)->setWrapText(true)->setShrinkToFit(false);
 
         // 4) Data rows: normal size 11, blue, shrink OFF so content is never shrunk. Prefix Name with (1), (2), (3)...
         $breakdownRows = $this->breakdownRows($subject->id, $dateFrom, $dateTo);
@@ -395,22 +396,24 @@ class ReportController extends Controller
             $sheet->getCell('D' . $r)->setValueExplicit($row['total'], DataType::TYPE_NUMERIC);
             $sheet->setCellValue('E' . $r, $row['frequency']);
             $sheet->getCell('F' . $r)->setValueExplicit($row['percentage'], DataType::TYPE_STRING);
-            $sheet->getStyle('C' . $r . ':F' . $r)->applyFromArray($centerAlignNoShrink);
-            $sheet->getStyle('C' . $r . ':F' . $r)->applyFromArray($blueFont);
+            $sheet->mergeCells('F' . $r . ':G' . $r);
+            $sheet->getStyle('C' . $r . ':G' . $r)->applyFromArray($centerAlignNoShrink);
+            $sheet->getStyle('C' . $r . ':G' . $r)->applyFromArray($blueFont);
         }
 
-        // 5) Clear remaining data rows and column G (no spill)
+        // 5) Clear remaining data rows and merge F:G for empty percentage column so no unused column G
         for ($r = $breakdownStartRow + count($breakdownRows); $r <= $breakdownEndRow; $r++) {
             foreach (['B', 'C', 'D', 'E', 'F', 'G'] as $col) {
                 $sheet->setCellValue($col . $r, '');
             }
+            $sheet->mergeCells('F' . $r . ':G' . $r);
         }
-        for ($r = $breakdownTitleRow; $r <= $breakdownEndRow; $r++) {
+        for ($r = $breakdownTitleRow; $r <= $breakdownHeaderRow; $r++) {
             $sheet->setCellValue('G' . $r, '');
         }
 
-        // 6) Table border: B50:F62 so the block is clearly one table
-        $tableRange = 'B' . $breakdownTitleRow . ':F' . $breakdownEndRow;
+        // 6) Table border: B50:G62 so the block is one table and column G is part of Percentage (no unused column)
+        $tableRange = 'B' . $breakdownTitleRow . ':G' . $breakdownEndRow;
         $sheet->getStyle($tableRange)->applyFromArray([
             'borders' => [
                 'allBorders' => ['borderStyle' => Border::BORDER_THIN],
@@ -418,6 +421,7 @@ class ReportController extends Controller
         ]);
 
         // 7) Hide unused columns to the right of the table (G–J) so the sheet doesn’t look empty; template width unchanged
+        // Hide only H–J (unused to the right of breakdown). Never hide G: Remarks table at top uses F16:G19.
         foreach (['H', 'I', 'J'] as $col) {
             $sheet->getColumnDimension($col)->setVisible(false);
         }
