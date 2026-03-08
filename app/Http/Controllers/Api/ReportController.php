@@ -63,6 +63,29 @@ class ReportController extends Controller
     }
 
     /**
+     * GET /api/reports/template-status — check if the Excel template exists in storage/app/reports/.
+     * Use this to confirm the template is present in deployment (e.g. DigitalOcean App Platform).
+     */
+    public function templateStatus(): JsonResponse
+    {
+        $reportsDir = storage_path('app/reports');
+        $found = null;
+        foreach (self::TEMPLATE_FILENAMES as $filename) {
+            $full = $reportsDir . DIRECTORY_SEPARATOR . $filename;
+            if (file_exists($full)) {
+                $found = $filename;
+                break;
+            }
+        }
+
+        return response()->json([
+            'template_available' => $found !== null,
+            'template_filename' => $found,
+            'path_checked' => $reportsDir,
+        ]);
+    }
+
+    /**
      * GET /api/reports/performance-report?date_from=Y-m-d&date_to=Y-m-d
      *     &ao_id= (school head only: which AO)
      * Returns Excel file download.

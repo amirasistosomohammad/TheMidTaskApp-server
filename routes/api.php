@@ -120,6 +120,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/school-head/task-history', [TaskController::class, 'taskHistory']);
 
     // Performance report (Personnel: own report; School Head: report for supervised AO)
+    Route::get('/reports/template-status', [ReportController::class, 'templateStatus']);
     Route::get('/reports/performance-report', [ReportController::class, 'performanceReport']);
 
     // School Head: list supervised AOs for report dropdown
