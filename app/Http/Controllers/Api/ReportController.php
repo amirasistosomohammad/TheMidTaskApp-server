@@ -663,13 +663,20 @@ class ReportController extends Controller
     }
 
     /**
-     * True if the given URL belongs to this app (same host as APP_URL). Used to allow fetching signature for embedding.
+     * True if the given URL belongs to this app (same host as APP_URL or current request host). Used to allow fetching signature for embedding.
      */
     private function isAppUrl(string $url): bool
     {
         $appHost = parse_url(config('app.url'), PHP_URL_HOST);
+        $requestHost = request()->getHost();
         $urlHost = parse_url($url, PHP_URL_HOST);
-        return $appHost !== false && $urlHost !== false && strtolower($appHost) === strtolower($urlHost);
+        
+        if ($urlHost === false) {
+            return false;
+        }
+        
+        $urlHost = strtolower($urlHost);
+        return ($appHost !== false && strtolower($appHost) === $urlHost) || strtolower($requestHost) === $urlHost;
     }
 
     /**

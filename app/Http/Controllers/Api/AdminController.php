@@ -215,17 +215,23 @@ class AdminController extends Controller
         ]);
 
         if ($user->avatar_url) {
-            $baseUrl = rtrim(Storage::disk('public')->url(''), '/');
+            $baseUrl = rtrim(\Illuminate\Support\Facades\Storage::disk('public')->url(''), '/');
             $oldPath = str_starts_with($user->avatar_url, $baseUrl . '/')
                 ? substr($user->avatar_url, strlen($baseUrl) + 1)
                 : null;
-            if ($oldPath && Storage::disk('public')->exists($oldPath)) {
-                Storage::disk('public')->delete($oldPath);
+            if ($oldPath) {
+                try {
+                    if (\Illuminate\Support\Facades\Storage::disk('public')->exists($oldPath)) {
+                        \Illuminate\Support\Facades\Storage::disk('public')->delete($oldPath);
+                    }
+                } catch (\Throwable $e) {
+                    // Ignore deletion errors
+                }
             }
         }
 
         $path = $request->file('avatar')->store('avatars', 'public');
-        $url = asset('storage/' . $path);
+        $url = \Illuminate\Support\Facades\Storage::disk('public')->url($path);
         $user->update(['avatar_url' => $url]);
 
         return response()->json([

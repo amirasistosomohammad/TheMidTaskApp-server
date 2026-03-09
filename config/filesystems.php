@@ -45,7 +45,14 @@ return [
             // Normalize base URL: force HTTPS when not localhost (avoids Mixed Content in deployment).
             // Must include /api so URLs match the actual route (api.php is mounted at /api).
             'url' => (function () {
-                $base = env('STORAGE_PUBLIC_URL') ?: env('APP_URL', 'http://localhost');
+                $base = env('STORAGE_PUBLIC_URL');
+                if (!$base) {
+                    if (app()->runningInConsole()) {
+                        $base = env('APP_URL', 'http://localhost');
+                    } else {
+                        $base = 'https://' . request()->getHost();
+                    }
+                }
                 $base = rtrim((string) $base, '/');
                 $base = preg_replace('#^http://https?//#', 'https://', $base);
                 $base = preg_replace('#^https//#', 'https://', $base);
