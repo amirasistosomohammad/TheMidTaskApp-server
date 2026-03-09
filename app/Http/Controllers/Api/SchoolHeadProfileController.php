@@ -54,19 +54,29 @@ class SchoolHeadProfileController extends Controller
             'signature' => ['required', 'image', 'mimes:jpeg,jpg,png', 'max:2048'],
         ]);
 
-        $baseUrl = rtrim(Storage::disk('public')->url(''), '/');
         if ($user->signature_url) {
+            $baseUrl = rtrim(\Illuminate\Support\Facades\URL::to('api/storage'), '/');
             $oldPath = str_starts_with($user->signature_url, $baseUrl . '/')
                 ? substr($user->signature_url, strlen($baseUrl) + 1)
                 : null;
-            if ($oldPath && Storage::disk('public')->exists($oldPath)) {
-                Storage::disk('public')->delete($oldPath);
+            if ($oldPath) {
+                try {
+                    if (\Illuminate\Support\Facades\Storage::disk('public')->exists($oldPath)) {
+                        \Illuminate\Support\Facades\Storage::disk('public')->delete($oldPath);
+                    }
+                } catch (\Throwable $e) {
+                    // Ignore deletion errors
+                }
             }
         }
 
-        $path = $request->file('signature')->store('signatures', 'public');
-        $url = Storage::disk('public')->url($path);
-        $user->update(['signature_url' => $url]);
+        $path = ltrim($request->file('signature')->store('signatures', 'public'), '/');
+        if ($path !== '') {
+            $url = \Illuminate\Support\Facades\URL::to('api/storage/' . $path);
+            $user->update(['signature_url' => $url]);
+        } else {
+            $url = null;
+        }
 
         return response()->json([
             'message' => 'Signature updated successfully.',
@@ -78,13 +88,19 @@ class SchoolHeadProfileController extends Controller
 
     private function removeSignature($user): JsonResponse
     {
-        $baseUrl = rtrim(Storage::disk('public')->url(''), '/');
         if ($user->signature_url) {
+            $baseUrl = rtrim(\Illuminate\Support\Facades\URL::to('api/storage'), '/');
             $oldPath = str_starts_with($user->signature_url, $baseUrl . '/')
                 ? substr($user->signature_url, strlen($baseUrl) + 1)
                 : null;
-            if ($oldPath && Storage::disk('public')->exists($oldPath)) {
-                Storage::disk('public')->delete($oldPath);
+            if ($oldPath) {
+                try {
+                    if (\Illuminate\Support\Facades\Storage::disk('public')->exists($oldPath)) {
+                        \Illuminate\Support\Facades\Storage::disk('public')->delete($oldPath);
+                    }
+                } catch (\Throwable $e) {
+                    // Ignore
+                }
             }
         }
         $user->update(['signature_url' => null]);
