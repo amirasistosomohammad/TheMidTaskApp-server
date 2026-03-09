@@ -47,6 +47,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', [AuthController::class, 'user']);
     Route::put('/user/profile', [AuthController::class, 'updateProfile']);
     Route::post('/user/avatar', [AuthController::class, 'uploadAvatar']);
+    Route::post('/user/school-logo', [AuthController::class, 'uploadSchoolLogo']);
     Route::put('/user/password', [AuthController::class, 'updatePassword']);
 
     // Central Admin: account approvals + create user (School Head, etc.)

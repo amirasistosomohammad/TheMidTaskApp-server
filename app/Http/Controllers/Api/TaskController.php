@@ -13,6 +13,9 @@ use App\Models\InputData;
 use App\Models\Validation;
 use App\Models\Reminder;
 use App\Notifications\SubmissionPendingValidationNotification;
+use App\Notifications\SubmissionApprovedNotification;
+use App\Notifications\SubmissionRejectedNotification;
+use App\Notifications\TaskAssignedNotification;
 use Illuminate\Support\Facades\Storage;
 use App\Services\DueDateService;
 use Illuminate\Http\JsonResponse;
@@ -377,6 +380,7 @@ class TaskController extends Controller
                     'position' => $ut->user->position,
                     'division' => $ut->user->division,
                     'school_name' => $ut->user->school_name,
+                    'school_logo_url' => $ut->user->school_logo_url,
                 ] : null,
             ]),
         ]);
@@ -452,6 +456,15 @@ class TaskController extends Controller
             $request
         );
 
+        // Notify each assignee by email that a task was assigned to them.
+        $task->loadMissing([]);
+        foreach ($created as $c) {
+            $ut = UserTask::with(['task', 'user'])->find($c['id'] ?? null);
+            if ($ut && $ut->user && $ut->user->email) {
+                $ut->user->notify(new TaskAssignedNotification($ut));
+            }
+        }
+
         return response()->json([
             'message' => count($created) . ' assignment(s) created.',
             'assignments' => $created,
@@ -525,6 +538,14 @@ class TaskController extends Controller
             ],
             $request
         );
+
+        // Notify the assignee by email for each created assignment.
+        foreach ($created as $c) {
+            $ut = UserTask::with('task')->find($c['id'] ?? null);
+            if ($ut && $ut->user_id === $user->id && $user->email) {
+                $user->notify(new TaskAssignedNotification($ut));
+            }
+        }
 
         return response()->json([
             'message' => count($created) . ' recurring assignment(s) created.',
@@ -757,7 +778,7 @@ class TaskController extends Controller
             ->findOrFail($id);
 
         $submissions = Submission::where('user_task_id', $userTask->id)
-            ->with(['files', 'inputData'])
+            ->with(['files', 'inputData', 'validations'])
             ->orderBy('created_at')
             ->get();
 
@@ -1241,6 +1262,17 @@ class TaskController extends Controller
             $request
         );
 
+        // Notify personnel by email that their task was approved or rejected.
+        $personnel = $userTask->user;
+        if ($personnel && $personnel->email) {
+            $userTask->loadMissing('task');
+            if ($status === 'approved') {
+                $personnel->notify(new SubmissionApprovedNotification($userTask, $feedback));
+            } else {
+                $personnel->notify(new SubmissionRejectedNotification($userTask, $feedback));
+            }
+        }
+
         return response()->json([
             'message' => $status === 'approved'
                 ? 'Submission approved successfully.'
@@ -1326,6 +1358,7 @@ class TaskController extends Controller
                 'id' => $u->id,
                 'name' => $u->name,
                 'school_name' => $u->school_name,
+                'school_logo_url' => $u->school_logo_url,
             ])
             ->values()
             ->all();
@@ -1502,6 +1535,7 @@ class TaskController extends Controller
                 'position' => $ut->user->position,
                 'division' => $ut->user->division,
                 'school_name' => $ut->user->school_name,
+                'school_logo_url' => $ut->user->school_logo_url,
             ] : null,
         ];
     }
@@ -1528,6 +1562,14 @@ class TaskController extends Controller
             'input_data' => $s->relationLoaded('inputData') && $s->inputData
                 ? $this->inputDataToArray($s->inputData)
                 : null,
+            'validations' => $s->relationLoaded('validations')
+                ? $s->validations->map(fn ($v) => [
+                    'id' => $v->id,
+                    'status' => $v->status,
+                    'feedback' => $v->feedback,
+                    'validated_at' => $v->validated_at?->toIso8601String(),
+                ])->all()
+                : [],
             'user_task' => $s->relationLoaded('userTask') ? $this->userTaskToDashboardItem($s->userTask) : null,
         ];
     }

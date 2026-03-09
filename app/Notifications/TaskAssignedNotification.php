@@ -2,20 +2,18 @@
 
 namespace App\Notifications;
 
-use App\Models\User;
 use App\Models\UserTask;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class SubmissionPendingValidationNotification extends Notification implements ShouldQueue
+class TaskAssignedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 
     public function __construct(
-        public UserTask $userTask,
-        public User $submittedBy
+        public UserTask $userTask
     ) {
     }
 
@@ -26,10 +24,8 @@ class SubmissionPendingValidationNotification extends Notification implements Sh
 
     public function toMail(mixed $notifiable): MailMessage
     {
-        $task = $this->userTask->task;
+        $task = $this->userTask->relationLoaded('task') ? $this->userTask->task : null;
         $taskName = $task?->name ?? 'Task';
-        $aoName = $this->submittedBy->name ?: 'Administrative Officer';
-        $school = $this->submittedBy->school_name ?: '—';
         $dueDate = $this->userTask->due_date ? \Carbon\Carbon::parse($this->userTask->due_date)->format('F j, Y') : '—';
         
         $periodCovered = null;
@@ -40,20 +36,17 @@ class SubmissionPendingValidationNotification extends Notification implements Sh
                 $periodCovered = $this->userTask->period_covered;
             }
         }
-
-        $frontendUrl = rtrim((string) config('app.frontend_url', config('app.url', 'http://localhost:5173')), '/');
-        $validationsUrl = $frontendUrl ? "{$frontendUrl}/dashboard" : null;
+        
+        $frontendUrl = rtrim((string) config('app.frontend_url', 'http://localhost:5173'), '/');
+        $taskUrl = $frontendUrl ? "{$frontendUrl}/dashboard/my-tasks/{$this->userTask->id}" : null;
 
         return (new MailMessage())
-            ->subject("Validation needed: {$taskName}")
-            ->view('emails.submission-pending', [
+            ->subject("New task assigned: {$taskName}")
+            ->view('emails.task-assigned', [
                 'taskName' => $taskName,
                 'dueDate' => $dueDate,
                 'periodCovered' => $periodCovered,
-                'aoName' => $aoName,
-                'school' => $school,
-                'url' => $validationsUrl,
+                'url' => $taskUrl,
             ]);
     }
 }
-

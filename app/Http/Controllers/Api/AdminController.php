@@ -14,6 +14,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use App\Notifications\AccountApprovedNotification;
+use App\Notifications\AccountRejectedNotification;
 
 /**
  * Central Admin only: account approvals (list pending, approve, reject).
@@ -223,7 +225,7 @@ class AdminController extends Controller
         }
 
         $path = $request->file('avatar')->store('avatars', 'public');
-        $url = Storage::disk('public')->url($path);
+        $url = asset('storage/' . $path);
         $user->update(['avatar_url' => $url]);
 
         return response()->json([
@@ -302,6 +304,10 @@ class AdminController extends Controller
 
         ActivityLog::log($request->user()->id, 'user_approved', 'Approved account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
 
+        if ($user->email) {
+            $user->notify(new AccountApprovedNotification($user->approved_remarks));
+        }
+
         return response()->json([
             'message' => 'Account approved successfully.',
             'user' => [
@@ -332,6 +338,10 @@ class AdminController extends Controller
             'approved_remarks' => null,
         ]);
         ActivityLog::log($request->user()->id, 'user_rejected', 'Rejected account: ' . $user->name . ' (' . $user->email . ')', ['user_id' => $user->id], $request);
+
+        if ($user->email) {
+            $user->notify(new AccountRejectedNotification($user->rejection_remarks));
+        }
 
         return response()->json([
             'message' => 'Account rejected.',
@@ -372,7 +382,7 @@ class AdminController extends Controller
 
         $users = $query->get([
             'id', 'name', 'email', 'role', 'status',
-            'employee_id', 'position', 'division', 'school_name', 'avatar_url',
+            'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url',
             'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks',
             'email_verified_at', 'created_at', 'updated_at',
         ]);
@@ -390,6 +400,7 @@ class AdminController extends Controller
                     'division' => $u->division,
                     'school_name' => $u->school_name,
                     'avatar_url' => $u->avatar_url,
+                    'school_logo_url' => $u->school_logo_url,
                     'approved_at' => $u->approved_at?->toIso8601String(),
                     'approved_remarks' => $u->approved_remarks,
                     'rejected_at' => $u->rejected_at?->toIso8601String(),
@@ -462,7 +473,7 @@ class AdminController extends Controller
         }
 
         $users = $query->orderBy('name')->get([
-            'id', 'name', 'email', 'employee_id', 'position', 'division', 'school_name', 'avatar_url',
+                'id', 'name', 'email', 'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url', 'school_logo_url',
         ]);
 
         $today = now()->startOfDay();
@@ -513,6 +524,7 @@ class AdminController extends Controller
                 'division' => $user->division,
                 'school_name' => $user->school_name,
                 'avatar_url' => $user->avatar_url,
+                'school_logo_url' => $user->school_logo_url,
                 'pending_count' => count($pending),
                 'missing_count' => count($missing),
                 'completed_count' => count($completed),

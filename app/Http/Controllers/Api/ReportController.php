@@ -21,6 +21,7 @@ use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Color;
 use PhpOffice\PhpSpreadsheet\Style\Font;
 use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
+use PhpOffice\PhpSpreadsheet\Worksheet\PageSetup;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
@@ -96,7 +97,8 @@ class ReportController extends Controller
     /**
      * GET /api/reports/performance-report?date_from=Y-m-d&date_to=Y-m-d
      *     &ao_id= (school head only: which AO)
-     * Returns Excel file download.
+     *     &format=xlsx|pdf (optional; default xlsx). PDF is non-editable and recommended for official records.
+     * Returns Excel or PDF file download.
      */
     public function performanceReport(Request $request): StreamedResponse|Response|JsonResponse
     {
@@ -117,6 +119,7 @@ class ReportController extends Controller
             'date_from' => ['required', 'date'],
             'date_to' => ['required', 'date', 'after_or_equal:date_from'],
             'ao_id' => ['nullable', 'integer', 'exists:users,id'],
+            'format' => ['nullable', 'string', 'in:xlsx,pdf'],
         ]);
 
         $dateFrom = $valid['date_from'];
@@ -277,12 +280,40 @@ class ReportController extends Controller
         $sheet->setCellValue('C23', $totalTasks > 0 ? $completionRatePct . '%' : '0%');
         $sheet->setCellValue('D23', $totalTasks > 0 ? $completionRatePct . '%' : '0%');
 
-        $sheet->setCellValue('B42', $schoolHeadName);
-        $sheet->setCellValue('B43', $schoolHeadPosition);
+        // Remove any existing placeholder images (like school logo or signature) from the template so they don't show behind transparent PNGs
+        $existingDrawings = $sheet->getDrawingCollection()->getArrayCopy();
+        foreach ($existingDrawings as $drawing) {
+            if (is_callable([$drawing, 'setWorksheet'])) {
+                $drawing->setWorksheet(null);
+            }
+        }
+
+        // Compact layout: two blank rows above "Validated by:", one above "Date & Time:"; breakdown ends at last data row; remove template table below breakdown.
+        $validatedByLabelRow = 27;   // rows 25–26 = blank above
+        $signatureRow = 29;
+        $nameRow = 30;
+        $positionRow = 31;
+        $dateTimeRow = 33;           // row 32 = blank above Date & Time
+        $breakdownTitleRow = 35;
+        $breakdownHeaderRow = 36;
+        $breakdownStartRow = 37;
+        // breakdownEndRow set below after we know task count (no unused rows at bottom)
+
+        // Clear old validated-by and breakdown area (rows 38–62) so no duplicate content
+        for ($r = 38; $r <= 62; $r++) {
+            foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G'] as $col) {
+                $sheet->setCellValue($col . $r, '');
+            }
+        }
+
+        $sheet->setCellValue('B' . $validatedByLabelRow, 'Validated by:');
+        $sheet->getStyle('B' . $validatedByLabelRow)->getFont()->setBold(true);
+        $sheet->setCellValue('B' . $nameRow, $schoolHeadName);
+        $sheet->setCellValue('B' . $positionRow, $schoolHeadPosition);
 
         try {
-            // Unmerge cells above the name (B39–B41) so the signature image is not hidden by merged cells.
-            $validatedByCells = ['B39', 'B40', 'B41', 'C39', 'C40', 'C41'];
+            // Unmerge cells for signature area (B28–B30, C28–C30)
+            $validatedByCells = ['B28', 'B29', 'B30', 'C28', 'C29', 'C30'];
             $validatedByMergesToUnmerge = [];
             foreach ($sheet->getMergeCells() as $mergeRange) {
                 foreach ($validatedByCells as $cell) {
@@ -296,21 +327,21 @@ class ReportController extends Controller
                 $sheet->unmergeCells($mergeRange);
             }
 
-            // If the designated school head has a digital signature, place it in B41 (directly above the name).
             if ($schoolHead) {
                 $schoolHeadWithSignature = User::select(['id', 'name', 'position', 'signature_url'])->find($schoolHead->id);
                 if ($schoolHeadWithSignature?->signature_url) {
-                    $signaturePath = $this->resolveSignatureUrlToPath($schoolHeadWithSignature->signature_url);
+                    $signaturePath = $this->resolveImageUrlToPath($schoolHeadWithSignature->signature_url, 'signatures');
                     if (! $signaturePath && $this->isAppUrl($schoolHeadWithSignature->signature_url)) {
-                        $signaturePath = $this->fetchSignatureToTempFile($schoolHeadWithSignature->signature_url);
+                        $signaturePath = $this->fetchImageToTempFile($schoolHeadWithSignature->signature_url);
                     }
                     if ($signaturePath && is_readable($signaturePath)) {
+                        $signaturePath = $this->prepareImageForReport($signaturePath) ?: $signaturePath;
                         $signaturePath = realpath($signaturePath) ?: $signaturePath;
                         $signaturePath = str_replace('\\', '/', $signaturePath);
                         $drawing = new Drawing();
                         $drawing->setName('SchoolHeadSignature');
                         $drawing->setPath($signaturePath);
-                        $drawing->setCoordinates('B41');
+                        $drawing->setCoordinates('B' . $signatureRow);
                         $drawing->setWidth(100);
                         $drawing->setHeight(45);
                         $drawing->setWorksheet($sheet);
@@ -318,27 +349,66 @@ class ReportController extends Controller
                 }
             }
         } catch (\Throwable $e) {
-            // Do not fail report generation: skip signature/unmerge if anything throws (e.g. production path, template merge).
+            report($e);
+        }
+
+        try {
+            // Unmerge cells ONLY for column B in the logo area (B2–B7) so we don't break the header text merges in C/D/E.
+            $logoCells = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7'];
+            $logoMergesToUnmerge = [];
+            foreach ($sheet->getMergeCells() as $mergeRange) {
+                foreach ($logoCells as $cell) {
+                    if (Coordinate::coordinateIsInsideRange($mergeRange, $cell)) {
+                        $logoMergesToUnmerge[$mergeRange] = true;
+                        break;
+                    }
+                }
+            }
+            foreach (array_keys($logoMergesToUnmerge) as $mergeRange) {
+                $sheet->unmergeCells($mergeRange);
+            }
+
+            if ($subject->school_logo_url) {
+                $logoPath = $this->resolveImageUrlToPath($subject->school_logo_url, 'school_logos');
+                if (! $logoPath && $this->isAppUrl($subject->school_logo_url)) {
+                    $logoPath = $this->fetchImageToTempFile($subject->school_logo_url);
+                }
+                if ($logoPath && is_readable($logoPath)) {
+                    $logoPath = $this->prepareImageForReport($logoPath) ?: $logoPath;
+                    $logoPath = realpath($logoPath) ?: $logoPath;
+                    $logoPath = str_replace('\\', '/', $logoPath);
+                    $drawing = new Drawing();
+                    $drawing->setName('SchoolLogo');
+                    $drawing->setPath($logoPath);
+                    $drawing->setCoordinates('B2');
+                    $drawing->setResizeProportional(true);
+                    $drawing->setHeight(85);
+                    $drawing->setOffsetX(10); // slightly offset from left edge
+                    $drawing->setOffsetY(5);
+                    $drawing->setWorksheet($sheet);
+                }
+            }
+        } catch (\Throwable $e) {
             report($e);
         }
 
         $dateTimeLabel = now(config('app.timezone'))->format('F j, Y g:i A');
-        $sheet->setCellValue('C45', $dateTimeLabel);
-        $sheet->setCellValue('D45', '');
-        $sheet->getStyle('C45')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT)->setVertical(Alignment::VERTICAL_CENTER);
-        $dateTimeFont = $sheet->getStyle('C45')->getFont();
+        $sheet->setCellValue('B' . $dateTimeRow, 'Date & Time:');
+        $sheet->getStyle('B' . $dateTimeRow)->getFont()->setBold(true);
+        $sheet->setCellValue('C' . $dateTimeRow, $dateTimeLabel);
+        $sheet->setCellValue('D' . $dateTimeRow, '');
+        $sheet->getStyle('C' . $dateTimeRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT)->setVertical(Alignment::VERTICAL_CENTER);
+        $dateTimeFont = $sheet->getStyle('C' . $dateTimeRow)->getFont();
         $dateTimeFont->setUnderline(Font::UNDERLINE_SINGLE);
         $dateTimeFont->getColor()->setARGB(Color::COLOR_BLACK);
         $dateTimeFont->setUnderlineColor(['type' => 'srgbClr', 'value' => '000000']);
 
         // NUCLEAR FIX: Rebuild the entire BREAKDOWN ANALYSIS block from scratch. Do not depend on template merges or layout.
-        $breakdownTitleRow = 50;
-        $breakdownHeaderRow = 51;
-        $breakdownStartRow = 52;
-        $breakdownEndRow = 62;
         $breakdownCols = ['B', 'C', 'D', 'E', 'F', 'G'];
+        $breakdownRows = $this->breakdownRows($subject->id, $dateFrom, $dateTo);
+        $breakdownEndRow = $breakdownStartRow + max(count($breakdownRows), 1) - 1; // end at last data row (no unused rows at bottom)
 
-        // 1) Unmerge every cell in the block (rows 50–62, B–G)
+        // 1) Unmerge every cell in the block
         $cellsToUnmerge = [];
         for ($row = $breakdownTitleRow; $row <= $breakdownEndRow; $row++) {
             foreach ($breakdownCols as $col) {
@@ -380,7 +450,6 @@ class ReportController extends Controller
         $sheet->getStyle('C' . $breakdownHeaderRow . ':G' . $breakdownHeaderRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER)->setVertical(Alignment::VERTICAL_CENTER)->setWrapText(true)->setShrinkToFit(false);
 
         // 4) Data rows: normal size 11, blue, shrink OFF so content is never shrunk. Prefix Name with (1), (2), (3)...
-        $breakdownRows = $this->breakdownRows($subject->id, $dateFrom, $dateTo);
         $centerAlignNoShrink = ['alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'shrinkToFit' => false]];
         $leftAlignNoShrink = ['alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'shrinkToFit' => false]];
         $blueFont = ['font' => ['color' => ['argb' => Color::COLOR_BLUE], 'size' => 11]];
@@ -412,7 +481,7 @@ class ReportController extends Controller
             $sheet->setCellValue('G' . $r, '');
         }
 
-        // 6) Table border: B50:G62 so the block is one table and column G is part of Percentage (no unused column)
+        // 6) Table border for breakdown block only (no unused table below)
         $tableRange = 'B' . $breakdownTitleRow . ':G' . $breakdownEndRow;
         $sheet->getStyle($tableRange)->applyFromArray([
             'borders' => [
@@ -420,17 +489,45 @@ class ReportController extends Controller
             ],
         ]);
 
+        // 7) Remove unused template table below breakdown: unmerge and clear borders for rows after last data row through 62
+        $belowBreakdownStart = $breakdownEndRow + 1;
+        if ($belowBreakdownStart <= 62) {
+            $cellsBelow = [];
+            for ($row = $belowBreakdownStart; $row <= 62; $row++) {
+                foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G'] as $col) {
+                    $cellsBelow[] = $col . $row;
+                    $sheet->setCellValue($col . $row, '');
+                }
+            }
+            $mergesBelowToRemove = [];
+            foreach ($sheet->getMergeCells() as $mergeRange) {
+                foreach ($cellsBelow as $cell) {
+                    if (Coordinate::coordinateIsInsideRange($mergeRange, $cell)) {
+                        $mergesBelowToRemove[$mergeRange] = true;
+                        break;
+                    }
+                }
+            }
+            foreach (array_keys($mergesBelowToRemove) as $mergeRange) {
+                $sheet->unmergeCells($mergeRange);
+            }
+            $belowRange = 'B' . $belowBreakdownStart . ':G62';
+            $sheet->getStyle($belowRange)->applyFromArray(['borders' => ['allBorders' => ['borderStyle' => Border::BORDER_NONE]]]);
+        }
+
         // 7) Hide unused columns to the right of the table (G–J) so the sheet doesn’t look empty; template width unchanged
         // Hide only H–J (unused to the right of breakdown). Never hide G: Remarks table at top uses F16:G19.
         foreach (['H', 'I', 'J'] as $col) {
             $sheet->getColumnDimension($col)->setVisible(false);
         }
 
-        $filename = sprintf(
-            'Performance_Report_%s_%s.xlsx',
+        $outputFormat = $valid['format'] ?? 'xlsx';
+        $baseName = sprintf(
+            'Performance_Report_%s_%s',
             preg_replace('/[^a-z0-9]+/i', '_', $subject->name),
             date('Y-m-d')
         );
+        $filename = $outputFormat === 'pdf' ? $baseName . '.pdf' : $baseName . '.xlsx';
 
         // Final overwrite: period and task counts so export has correct values
         $sheet->getCell('C11')->setValueExplicit($periodLabel, DataType::TYPE_STRING);
@@ -440,6 +537,91 @@ class ReportController extends Controller
         $sheet->setCellValue('D22', $totalTasks);
         $sheet->setCellValue('C23', $totalTasks > 0 ? $completionRatePct . '%' : '0%');
         $sheet->setCellValue('D23', $totalTasks > 0 ? $completionRatePct . '%' : '0%');
+
+        if ($outputFormat === 'pdf') {
+            $tempPath = null;
+            try {
+                // Ensure Composer autoload (and thus mPDF) is loaded — fixes "Class Mpdf\Mpdf not found" if PHP was started before composer install or from wrong dir
+                $autoload = base_path('vendor/autoload.php');
+                if (is_file($autoload)) {
+                    require_once $autoload;
+                }
+                if (! class_exists(\Mpdf\Mpdf::class, true)) {
+                    return response()->json([
+                        'message' => 'PDF generation failed. The mPDF library is not available. Run "composer install" in the server directory and restart the PHP server.',
+                        'detail' => 'Class "Mpdf\Mpdf" not found',
+                    ], 503);
+                }
+                if (function_exists('ini_set')) {
+                    @ini_set('pcre.backtrack_limit', (string) 5_000_000);
+                }
+
+                // PDF: even margins, exclude empty column A from print area so it centers perfectly, adjust widths so headers don't wrap.
+                $sheet->getPageMargins()
+                    ->setLeft(0.5)
+                    ->setRight(0.5)
+                    ->setTop(0.5)
+                    ->setBottom(0.5)
+                    ->setHeader(0.3)
+                    ->setFooter(0.3);
+                $sheet->getPageSetup()->setHorizontalCentered(true);
+                // Exclude empty column A from print area to regain space and keep table centered
+                $sheet->getPageSetup()->setPrintArea('B1:G' . ($breakdownEndRow + 1));
+
+                // Column widths tailored for PDF to fit content without wrapping, keeping total width reasonable so it doesn't scale down
+                $sheet->getColumnDimension('B')->setWidth(26); // Name of Task, Validated by, Criteria
+                $sheet->getColumnDimension('C')->setWidth(24); // Completed, Date value, Rating
+                $sheet->getColumnDimension('D')->setWidth(15); // No. of Task, header portion
+                $sheet->getColumnDimension('E')->setWidth(15); // Frequency, header portion
+                $sheet->getColumnDimension('F')->setWidth(15); // Percentage / Remarks, header portion
+                $sheet->getColumnDimension('G')->setWidth(15); // Percentage / Remarks, header portion
+
+                // Blank row spacing only
+                $sheet->getRowDimension(26)->setRowHeight(18);
+                $sheet->getRowDimension(32)->setRowHeight(18);
+
+                // No wrap on header/title rows so text stays on one line (layout only)
+                foreach ([3, 4, 5, 9, 10, 11, 13] as $row) {
+                    $sheet->getStyle('B' . $row . ':G' . $row)->getAlignment()->setWrapText(false)->setShrinkToFit(false);
+                }
+
+                IOFactory::registerWriter('Pdf', \PhpOffice\PhpSpreadsheet\Writer\Pdf\Mpdf::class);
+                $writer = IOFactory::createWriter($spreadsheet, 'Pdf');
+                // Force PhpSpreadsheet to base64-encode images into the HTML sent to mPDF.
+                // This fixes the issue where PNGs (or other images) show as a broken [x] in the PDF on Windows/production.
+                if (method_exists($writer, 'setEmbedImages')) {
+                    $writer->setEmbedImages(true);
+                }
+                $tempPath = tempnam(sys_get_temp_dir(), 'perf_report_') . '.pdf';
+                $writer->save($tempPath);
+                return response()->streamDownload(function () use ($tempPath) {
+                    $stream = fopen($tempPath, 'rb');
+                    if ($stream) {
+                        fpassthru($stream);
+                        fclose($stream);
+                    }
+                    @unlink($tempPath);
+                }, $filename, [
+                    'Content-Type' => 'application/pdf',
+                    'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+                    'Pragma' => 'no-cache',
+                    'Expires' => '0',
+                ]);
+            } catch (\Throwable $e) {
+                if ($tempPath !== null && file_exists($tempPath)) {
+                    @unlink($tempPath);
+                }
+                report($e);
+                $detail = config('app.debug') ? $e->getMessage() : null;
+                $hint = (str_contains($e->getMessage(), 'Mpdf') || str_contains($e->getMessage(), 'not found'))
+                    ? ' Run "composer install" in the server directory and restart the PHP server (e.g. php artisan serve).'
+                    : '';
+                return response()->json([
+                    'message' => 'PDF generation failed. Please try downloading as Excel instead.' . $hint,
+                    'detail' => $detail,
+                ], 500);
+            }
+        }
 
         $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
 
@@ -454,23 +636,23 @@ class ReportController extends Controller
     }
 
     /**
-     * Resolve school head signature_url to local filesystem path.
-     * Handles: full URL with /storage/signatures/..., path with app prefix (e.g. /themidtaskapp-server/storage/...), or signatures/...
+     * Resolve an image URL (like signature_url or school_logo_url) to local filesystem path.
+     * Handles: full URL with /storage/..., path with app prefix (e.g. /themidtaskapp-server/storage/...), or relative.
      */
-    private function resolveSignatureUrlToPath(string $signatureUrl): ?string
+    private function resolveImageUrlToPath(string $imageUrl, string $fallbackDir): ?string
     {
-        $pathPart = parse_url($signatureUrl, PHP_URL_PATH);
-        $pathPart = is_string($pathPart) ? ltrim($pathPart, '/') : trim($signatureUrl, '/');
+        $pathPart = parse_url($imageUrl, PHP_URL_PATH);
+        $pathPart = is_string($pathPart) ? ltrim($pathPart, '/') : trim($imageUrl, '/');
         $relativePath = null;
-        // Match .../storage/signatures/... or storage/signatures/... (production may have path prefix)
+        // Match .../storage/dir/... or dir/... (production may have path prefix)
         if (preg_match('#(?:^|/)storage/(.+)$#', $pathPart, $m)) {
             $relativePath = $m[1];
-        } elseif (str_starts_with($pathPart, 'signatures/')) {
+        } elseif (str_starts_with($pathPart, $fallbackDir . '/')) {
             $relativePath = $pathPart;
         } else {
             $basename = basename($pathPart);
-            if (preg_match('/\.(png|jpe?g)$/i', $basename) && Storage::disk('public')->exists('signatures/' . $basename)) {
-                $relativePath = 'signatures/' . $basename;
+            if (preg_match('/\.(png|jpe?g|gif|webp)$/i', $basename) && Storage::disk('public')->exists($fallbackDir . '/' . $basename)) {
+                $relativePath = $fallbackDir . '/' . $basename;
             }
         }
         if ($relativePath === null || ! Storage::disk('public')->exists($relativePath)) {
@@ -491,24 +673,62 @@ class ReportController extends Controller
     }
 
     /**
-     * Fetch signature image from app URL to a temp file and return the path. Returns null on failure.
+     * Converts any image to a flat JPEG temp file. This fixes PDF/mPDF issues with PNG/WebP/GIF transparency or interlacing.
      */
-    private function fetchSignatureToTempFile(string $signatureUrl): ?string
+    private function prepareImageForReport(string $originalPath): ?string
+    {
+        try {
+            $imageString = @file_get_contents($originalPath);
+            if (! $imageString) {
+                return null;
+            }
+            $gdImage = @imagecreatefromstring($imageString);
+            if (! $gdImage) {
+                return null;
+            }
+
+            $width = imagesx($gdImage);
+            $height = imagesy($gdImage);
+            
+            $newImage = imagecreatetruecolor($width, $height);
+            // Fill white background
+            $white = imagecolorallocate($newImage, 255, 255, 255);
+            imagefilledrectangle($newImage, 0, 0, $width, $height, $white);
+            
+            // Copy original over (handles transparency by blending onto white)
+            imagecopyresampled($newImage, $gdImage, 0, 0, 0, 0, $width, $height, $width, $height);
+            
+            $tempPath = tempnam(sys_get_temp_dir(), 'report_img_') . '.jpg';
+            imagejpeg($newImage, $tempPath, 90);
+            
+            imagedestroy($gdImage);
+            imagedestroy($newImage);
+            
+            return $tempPath;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Fetch image from app URL to a temp file and return the path. Returns null on failure.
+     */
+    private function fetchImageToTempFile(string $imageUrl): ?string
     {
         try {
             $context = stream_context_create([
                 'http' => ['timeout' => 5],
                 'ssl' => ['verify_peer' => true],
             ]);
-            $data = @file_get_contents($signatureUrl, false, $context);
+            $data = @file_get_contents($imageUrl, false, $context);
             if ($data === false || $data === '') {
                 return null;
             }
-            $tmp = tempnam(sys_get_temp_dir(), 'sig');
+            $tmp = tempnam(sys_get_temp_dir(), 'img');
             if ($tmp === false) {
                 return null;
             }
-            $ext = pathinfo(parse_url($signatureUrl, PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'png';
+            $ext = pathinfo(parse_url($imageUrl, PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'png';
             $tmpFile = $tmp . '.' . $ext;
             rename($tmp, $tmpFile);
             if (file_put_contents($tmpFile, $data) === false) {
@@ -558,28 +778,25 @@ class ReportController extends Controller
      */
     private function qualityPercent(int $userId, string $dateFrom, string $dateTo): float
     {
-        $submissionCount = Submission::query()
-            ->whereHas('userTask', function ($q) use ($userId, $dateFrom, $dateTo) {
-                $q->where('user_id', $userId)
-                    ->whereDate('due_date', '>=', $dateFrom)
-                    ->whereDate('due_date', '<=', $dateTo);
-            })
-            ->count();
-
-        if ($submissionCount === 0) {
-            return 0.0;
-        }
-
-        $approvedCount = Validation::query()
-            ->where('status', 'approved')
+        $validationQuery = Validation::query()
+            ->whereIn('status', ['approved', 'rejected'])
             ->whereHas('submission.userTask', function ($q) use ($userId, $dateFrom, $dateTo) {
                 $q->where('user_id', $userId)
                     ->whereDate('due_date', '>=', $dateFrom)
                     ->whereDate('due_date', '<=', $dateTo);
-            })
-            ->count();
+            });
 
-        return round(($approvedCount / $submissionCount) * 100, 2);
+        $totalValidations = (clone $validationQuery)->count();
+
+        if ($totalValidations === 0) {
+            // Default to 100% (5.0 rating) if no tasks have been evaluated by the school head yet,
+            // so they are not unfairly penalized with a 1.0 rating.
+            return 100.0;
+        }
+
+        $approvedCount = (clone $validationQuery)->where('status', 'approved')->count();
+
+        return round(($approvedCount / $totalValidations) * 100, 2);
     }
 
     /**

@@ -291,7 +291,7 @@ class AuthController extends Controller
                 'message' => 'Your account is pending approval. You have access to the dashboard until an administrator approves your account.',
                 'token' => $token,
                 'token_type' => 'Bearer',
-                'user' => $user->only(['id', 'name', 'email', 'role', 'status', 'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks']),
+                'user' => $user->only(['id', 'name', 'email', 'role', 'status', 'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url', 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks']),
             ]);
         }
 
@@ -304,7 +304,7 @@ class AuthController extends Controller
             'message' => 'Login successful.',
             'token' => $token,
             'token_type' => 'Bearer',
-            'user' => $user->only(['id', 'name', 'email', 'role', 'status', 'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks']),
+            'user' => $user->only(['id', 'name', 'email', 'role', 'status', 'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url', 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks']),
         ]);
     }
 
@@ -343,7 +343,7 @@ class AuthController extends Controller
         return response()->json([
             'user' => $user->only([
                 'id', 'name', 'email', 'role', 'status',
-                'employee_id', 'position', 'division', 'school_name', 'avatar_url',
+                'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url',
                 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks',
             ]),
         ]);
@@ -371,7 +371,7 @@ class AuthController extends Controller
             'message' => 'Profile updated successfully.',
             'user' => $user->fresh()->only([
                 'id', 'name', 'email', 'role', 'status',
-                'employee_id', 'position', 'division', 'school_name', 'avatar_url',
+                'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url',
                 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks',
             ]),
         ]);
@@ -399,7 +399,7 @@ class AuthController extends Controller
         }
 
         $path = $request->file('avatar')->store('avatars', 'public');
-        $url = Storage::disk('public')->url($path);
+        $url = asset('storage/' . $path);
         $user->update(['avatar_url' => $url]);
 
         return response()->json([
@@ -407,7 +407,40 @@ class AuthController extends Controller
             'avatar_url' => $url,
             'user' => $user->fresh()->only([
                 'id', 'name', 'email', 'role', 'status',
-                'employee_id', 'position', 'division', 'school_name', 'avatar_url',
+                'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url',
+                'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks',
+            ]),
+        ]);
+    }
+
+    public function uploadSchoolLogo(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $request->validate([
+            'school_logo' => ['required', 'image', 'mimes:jpeg,jpg,png,gif,webp', 'max:2048'],
+        ]);
+
+        if ($user->school_logo_url) {
+            $baseUrl = rtrim(Storage::disk('public')->url(''), '/');
+            $oldPath = str_starts_with($user->school_logo_url, $baseUrl . '/')
+                ? substr($user->school_logo_url, strlen($baseUrl) + 1)
+                : null;
+            if ($oldPath && Storage::disk('public')->exists($oldPath)) {
+                Storage::disk('public')->delete($oldPath);
+            }
+        }
+
+        $path = $request->file('school_logo')->store('school_logos', 'public');
+        $url = asset('storage/' . $path);
+        $user->update(['school_logo_url' => $url]);
+
+        return response()->json([
+            'message' => 'School logo updated successfully.',
+            'school_logo_url' => $url,
+            'user' => $user->fresh()->only([
+                'id', 'name', 'email', 'role', 'status',
+                'employee_id', 'position', 'division', 'school_name', 'avatar_url', 'school_logo_url',
                 'approved_at', 'approved_remarks', 'rejected_at', 'rejection_remarks',
             ]),
         ]);

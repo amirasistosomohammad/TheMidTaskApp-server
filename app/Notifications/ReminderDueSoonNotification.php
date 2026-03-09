@@ -52,22 +52,17 @@ class ReminderDueSoonNotification extends Notification implements ShouldQueue
             default => "This task is due in {$this->reminder->days_before_due} days.",
         };
 
-        $appUrl = rtrim((string) config('app.url'), '/');
+        $appUrl = rtrim((string) config('app.frontend_url', config('app.url', 'http://localhost:5173')), '/');
         $taskUrl = $appUrl ? "{$appUrl}/dashboard/my-tasks/{$this->userTask->id}" : null;
 
-        $mail = (new MailMessage())
+        return (new MailMessage())
             ->subject($subject)
-            ->greeting('Good day,')
-            ->line("This is an automatic reminder for your assigned task \"{$taskName}\".")
-            ->line($lineWhen)
-            ->line("Due date: {$dueDate}")
-            ->line('This message was sent automatically by The Mid-Task App.');
-
-        if ($taskUrl) {
-            $mail->action('View task', $taskUrl);
-        }
-
-        return $mail;
+            ->view('emails.reminder-due-soon', [
+                'taskName' => $taskName,
+                'dueDate' => $dueDate,
+                'lineWhen' => $lineWhen,
+                'url' => $taskUrl,
+            ]);
     }
 }
 
