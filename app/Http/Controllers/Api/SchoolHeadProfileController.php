@@ -70,9 +70,13 @@ class SchoolHeadProfileController extends Controller
             }
         }
 
-        $path = $request->file('signature')->store('signatures', 'public');
-        $url = \Illuminate\Support\Facades\Storage::disk('public')->url($path);
-        $user->update(['signature_url' => $url]);
+        $path = ltrim($request->file('signature')->store('signatures', 'public'), '/');
+        if ($path !== '') {
+            $url = \Illuminate\Support\Facades\URL::to('api/storage/' . $path);
+            $user->update(['signature_url' => $url]);
+        } else {
+            $url = null;
+        }
 
         return response()->json([
             'message' => 'Signature updated successfully.',
