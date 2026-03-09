@@ -230,11 +230,9 @@ class AdminController extends Controller
             }
         }
 
-        $path = ltrim($request->file('avatar')->store('avatars', 'public'), '/');
-        if ($path !== '') {
-            $url = \Illuminate\Support\Facades\URL::to('api/storage/' . $path);
-            $user->update(['avatar_url' => $url]);
-        }
+        $path = $request->file('avatar')->store('avatars', 'public');
+        $url = \Illuminate\Support\Facades\Storage::disk('public')->url($path);
+        $user->update(['avatar_url' => $url]);
 
         return response()->json([
             'message' => 'Avatar updated successfully.',

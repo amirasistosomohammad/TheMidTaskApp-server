@@ -34,7 +34,7 @@ class SettingsController extends Controller
         if ($s->logo_path) {
             $path = ltrim(str_replace(['../', '..\\'], '', $s->logo_path), '/');
             if ($path !== '' && ! str_contains($path, '..')) {
-                $logoUrl = URL::to('api/storage/' . $path);
+                $logoUrl = \Illuminate\Support\Facades\Storage::disk('public')->url($path);
             }
         }
 

@@ -55,7 +55,7 @@ class SchoolHeadProfileController extends Controller
         ]);
 
         if ($user->signature_url) {
-            $baseUrl = rtrim(\Illuminate\Support\Facades\URL::to('api/storage'), '/');
+            $baseUrl = rtrim(\Illuminate\Support\Facades\Storage::disk('public')->url(''), '/');
             $oldPath = str_starts_with($user->signature_url, $baseUrl . '/')
                 ? substr($user->signature_url, strlen($baseUrl) + 1)
                 : null;
@@ -70,13 +70,9 @@ class SchoolHeadProfileController extends Controller
             }
         }
 
-        $path = ltrim($request->file('signature')->store('signatures', 'public'), '/');
-        if ($path !== '') {
-            $url = \Illuminate\Support\Facades\URL::to('api/storage/' . $path);
-            $user->update(['signature_url' => $url]);
-        } else {
-            $url = null;
-        }
+        $path = $request->file('signature')->store('signatures', 'public');
+        $url = \Illuminate\Support\Facades\Storage::disk('public')->url($path);
+        $user->update(['signature_url' => $url]);
 
         return response()->json([
             'message' => 'Signature updated successfully.',
@@ -89,7 +85,7 @@ class SchoolHeadProfileController extends Controller
     private function removeSignature($user): JsonResponse
     {
         if ($user->signature_url) {
-            $baseUrl = rtrim(\Illuminate\Support\Facades\URL::to('api/storage'), '/');
+            $baseUrl = rtrim(\Illuminate\Support\Facades\Storage::disk('public')->url(''), '/');
             $oldPath = str_starts_with($user->signature_url, $baseUrl . '/')
                 ? substr($user->signature_url, strlen($baseUrl) + 1)
                 : null;
